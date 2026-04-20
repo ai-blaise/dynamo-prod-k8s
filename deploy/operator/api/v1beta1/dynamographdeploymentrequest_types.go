@@ -350,12 +350,6 @@ type HardwareSpec struct {
 	// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
-	// XPU SKU is the AIC hardware system identifier for the Intel XPU.
-	// When omitted, the operator auto-detects this via cluster XPU node labels.
-	// +optional
-	// +kubebuilder:validation:Enum=b60
-	XPUSKU XPUSKUType `json:"xpuSku,omitempty"`
-
 	// VRAMMB is the VRAM per GPU in MiB.
 	// +optional
 	VRAMMB *float64 `json:"vramMb,omitempty"`

@@ -615,16 +615,6 @@ spec:
                     vramMb:
                       description: VRAMMB is the VRAM per GPU in MiB.
                       type: number
-                    xpuSku:
-                      allOf:
-                        - enum:
-                            - b60
-                        - enum:
-                            - b60
-                      description: |-
-                        XPU SKU is the AIC hardware system identifier for the Intel XPU.
-                        When omitted, the operator auto-detects this via cluster XPU node labels.
-                      type: string
                   type: object
                 image:
                   description: |-

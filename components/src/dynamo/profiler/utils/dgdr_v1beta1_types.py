@@ -218,10 +218,6 @@ class HardwareSpec(BaseModel):
         default=None,
         description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
     )
-    xpuSku: Optional[XPUSKUType] = Field(
-        default=None,
-        description="XPU SKU is the AIC hardware system identifier for the Intel XPU. When omitted, the operator auto-detects this via cluster XPU node labels.",
-    )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."
     )
