@@ -70,6 +70,34 @@ on:
         required: false
         type: number
         default: 30
+      run_unified_tests:
+        description: 'Whether to run unified-backend tests in a separate job'
+        required: false
+        type: boolean
+        default: false
+      unified_test_markers:
+        description: 'Unified-backend pytest markers (typically includes `unified`)'
+        required: false
+        type: string
+      unified_test_timeout_minutes:
+        description: 'Timeout in minutes for unified-backend tests'
+        required: false
+        type: number
+        default: 30
+      run_sample_tests:
+        description: 'Whether to run sample-backend (framework-agnostic, CPU-only) tests in a separate job'
+        required: false
+        type: boolean
+        default: false
+      sample_test_markers:
+        description: 'Sample-backend pytest markers (typically `gpu_0 and unified`)'
+        required: false
+        type: string
+      sample_test_timeout_minutes:
+        description: 'Timeout in minutes for sample-backend tests'
+        required: false
+        type: number
+        default: 15
       copy_to_acr:
         description: 'Whether to copy images to ACR'
         required: false
@@ -170,6 +198,12 @@ jobs:
       run_multi_gpu_tests: ${{ inputs.run_multi_gpu_tests }}
       multi_gpu_test_markers: ${{ inputs.multi_gpu_test_markers }}
       multi_gpu_test_timeout_minutes: ${{ inputs.multi_gpu_test_timeout_minutes }}
+      run_unified_tests: ${{ inputs.run_unified_tests }}
+      unified_test_markers: ${{ inputs.unified_test_markers }}
+      unified_test_timeout_minutes: ${{ inputs.unified_test_timeout_minutes }}
+      run_sample_tests: ${{ inputs.run_sample_tests }}
+      sample_test_markers: ${{ inputs.sample_test_markers }}
+      sample_test_timeout_minutes: ${{ inputs.sample_test_timeout_minutes }}
       copy_to_acr: ${{ inputs.copy_to_acr }}
       copy_timeout_minutes: ${{ inputs.copy_timeout_minutes }}
       make_efa: ${{ inputs.make_efa }}

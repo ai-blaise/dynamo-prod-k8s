@@ -58,12 +58,18 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       copy_timeout_minutes: 20
-      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
-      multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0 and not unified'
+      single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not unified'
+      multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4) and not unified'
       cpu_only_test_timeout_minutes: 10
       single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
+      run_unified_tests: true
+      unified_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and unified'
+      unified_test_timeout_minutes: 45
+      run_sample_tests: true
+      sample_test_markers: '(pre_merge or post_merge) and gpu_0 and unified'
+      sample_test_timeout_minutes: 30
     secrets: inherit
 
   # ============================================================================
@@ -83,12 +89,15 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       copy_timeout_minutes: 20
-      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
-      multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
+      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0 and not unified'
+      single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1 and not unified'
+      multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4) and not unified'
       cpu_only_test_timeout_minutes: 10
       single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
+      run_unified_tests: true
+      unified_test_markers: '(pre_merge or post_merge) and sglang and gpu_1 and unified'
+      unified_test_timeout_minutes: 45
     secrets: inherit
 
   # ============================================================================
@@ -108,12 +117,15 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       copy_timeout_minutes: 20
-      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
-      multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0 and not unified'
+      single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1 and not unified'
+      multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4) and not unified'
       cpu_only_test_timeout_minutes: 10
       single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
+      run_unified_tests: true
+      unified_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1 and unified'
+      unified_test_timeout_minutes: 45
     secrets: inherit
 
   # ============================================================================
