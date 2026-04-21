@@ -15,31 +15,15 @@ def is_shadow_mode() -> bool:
 
 
 def validate_cudagraph_mode(engine_args) -> None:
-    """Validate and set cudagraph mode for shadow engines.
+    """No-op under Plan A.
 
-    Defaults unset mode to PIECEWISE (attention stubbed during graph capture).
-    Accepts NONE (e.g. enforce_eager). Rejects FULL variants which need
-    KV cache tensors that don't exist during shadow init.
+    Pre-Plan-A shadow mode left KV tensors empty during init, which broke
+    vLLM's FULL-mode cudagraph capture (_build_attention_metadata asserted on
+    slot_mappings). Plan A allocates real full-shape KV tensors at init over
+    scratch-aliased physical, so FULL capture works correctly. Kept as a
+    named stub because main.py imports and calls it.
     """
-    from vllm.config import CompilationConfig, CUDAGraphMode
-
-    cc = engine_args.compilation_config
-    assert isinstance(cc, CompilationConfig), (
-        f"Expected CompilationConfig, got {type(cc).__name__}. "
-        f"vLLM's arg parsing may have changed."
-    )
-
-    if cc.cudagraph_mode is None:
-        cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
-        logger.info("[Shadow] cudagraph_mode defaulted to PIECEWISE")
-    elif cc.cudagraph_mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
-        pass  # compatible
-    else:
-        raise ValueError(
-            f"Shadow mode requires PIECEWISE or NONE cudagraph mode, "
-            f"got {cc.cudagraph_mode.name}. FULL modes capture attention ops "
-            f"that need KV cache tensors, which don't exist during shadow init."
-        )
+    return
 
 
 def configure_gms_lock_mode(engine_args) -> None:

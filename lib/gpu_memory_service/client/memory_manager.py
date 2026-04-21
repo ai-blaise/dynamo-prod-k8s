@@ -42,6 +42,7 @@ from gpu_memory_service.common.cuda_utils import (
     cuda_validate_pointer,
     cumem_address_free,
     cumem_address_reserve,
+    cumem_create_tolerate_oom,
     cumem_get_allocation_granularity,
     cumem_import_from_shareable_handle_close_fd,
     cumem_map,
@@ -73,6 +74,35 @@ class StaleMemoryLayoutError(Exception):
     """
 
     pass
+
+
+@dataclass
+class _PlanAScratch:
+    """Tracking for a Plan-A scratch-aliased allocation.
+
+    At shadow-init time we reserve a full VA range for the KV cache but back it
+    with a single 2 MiB physical chunk aliased across every granule. torch.zeros
+    into this range succeeds (all writes hit one page); capture records VAs.
+    At wake, commit_real_backing() swaps the one chunk for N unique per-chunk
+    handles (one server-side allocation per granule) at the same VAs.
+
+    state transitions: "scratch" -> "real" (via commit_real_backing).
+    """
+
+    base_va: int
+    aligned_size: int
+    n_chunks: int
+    tag: str
+    scratch_handle: int = 0
+    real_handles: list = None
+    real_allocation_ids: list = None
+    state: str = "scratch"
+
+    def __post_init__(self):
+        if self.real_handles is None:
+            self.real_handles = []
+        if self.real_allocation_ids is None:
+            self.real_allocation_ids = []
 
 
 @dataclass(frozen=True)
@@ -143,6 +173,8 @@ class GMSClientMemoryManager:
         self._client: Optional[_GMSClientSession] = None
         self._mappings: Dict[int, LocalMapping] = {}  # va -> mapping
         self._inverse_mapping: Dict[str, int] = {}
+        # Plan-A scratch-aliased VAs keyed by base_va. Held until commit_real_backing.
+        self._plan_a_scratch: Dict[int, _PlanAScratch] = {}
 
         self._unmapped = False
         self._aborted = False
@@ -605,6 +637,223 @@ class GMSClientMemoryManager:
             reallocated,
         )
 
+    # ==================== Plan A: scratch-aliased KV backing ====================
+
+    def create_scratch_mapping(self, size: int, tag: str = "kv_cache") -> int:
+        """Reserve VA range and back it with ONE aliased physical chunk.
+
+        Used by the shadow engine at init time so torch.zeros on the full
+        kv_cache size succeeds without paying the real memory cost. Server is
+        not involved — the scratch handle is client-local (cuMemCreate without
+        export/import). At wake, call commit_real_backing() to swap in real
+        per-chunk handles at the same VAs.
+
+        Returns the base VA. Writes to any offset in [va, va+size) succeed
+        and land on the shared scratch page; reads return whatever was last
+        written. Capture semantics are unaffected because cudagraphs record
+        VAs, not physical addresses.
+        """
+        self._require_rw()
+        aligned_size = align_to_granularity(size, self.granularity)
+        if aligned_size % self.granularity != 0:
+            raise ValueError(
+                f"aligned_size {aligned_size} not a multiple of granularity {self.granularity}"
+            )
+        n_chunks = aligned_size // self.granularity
+
+        # Create one client-local physical chunk (scratch).
+        ok, scratch_handle = cumem_create_tolerate_oom(self.granularity, self.device)
+        if not ok:
+            raise RuntimeError(
+                "cuMemCreate failed to allocate the 2 MiB Plan-A scratch chunk "
+                f"on device {self.device} (out of memory)"
+            )
+
+        # Reserve VA range.
+        va = cumem_address_reserve(aligned_size, self.granularity)
+
+        # Map the single scratch handle at every granule of the VA range.
+        try:
+            for offset in range(0, aligned_size, self.granularity):
+                cumem_map(va + offset, self.granularity, scratch_handle)
+            cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
+        except Exception:
+            # On partial failure, best-effort teardown and re-raise.
+            try:
+                cumem_unmap(va, aligned_size)
+            except Exception:
+                pass
+            try:
+                cumem_address_free(va, aligned_size)
+            except Exception:
+                pass
+            cumem_release(scratch_handle)
+            raise
+
+        self._plan_a_scratch[va] = _PlanAScratch(
+            base_va=va,
+            aligned_size=aligned_size,
+            n_chunks=n_chunks,
+            tag=tag,
+            scratch_handle=scratch_handle,
+            state="scratch",
+        )
+        logger.info(
+            "[Plan A] Reserved %d MiB VA at 0x%x, aliased 1x %d MiB scratch across %d granules",
+            aligned_size // (1 << 20),
+            va,
+            self.granularity // (1 << 20),
+            n_chunks,
+        )
+        return va
+
+    def commit_real_backing(self) -> None:
+        """Swap every scratch mapping for a single real per-tensor allocation.
+
+        For each scratch VA: unmap, release scratch handle, allocate ONE
+        server-side handle sized to the full aligned tensor, import + map at
+        the base VA, set access. Torch tensors keep their data_ptr through
+        the swap; cudagraphs replay correctly.
+
+        A single per-tensor allocation is the cheapest shape: ~56 RPCs for
+        Qwen3-0.6B instead of 56 × 759 = 42k. cuMemCreate with size > 2 MiB
+        is supported — VMM min granularity is 2 MiB but allocations can be
+        any multiple of it.
+
+        Called by GMSWorker.wake_up after flock acquisition in shadow mode.
+        """
+        self._require_rw()
+        if not self._plan_a_scratch:
+            return
+
+        cuda_synchronize()
+
+        total_tensors = 0
+        for base_va, scratch in list(self._plan_a_scratch.items()):
+            if scratch.state != "scratch":
+                continue
+
+            # 1. Drop the aliased scratch mapping.
+            cumem_unmap(base_va, scratch.aligned_size)
+            cumem_release(scratch.scratch_handle)
+
+            # 2. Allocate ONE real handle for the full tensor, map at base VA.
+            real_handles = []
+            real_allocation_ids = []
+            try:
+                alloc_id, _layout_slot = self.allocate_handle(
+                    scratch.aligned_size, scratch.tag
+                )
+                fd = self.export_handle(alloc_id)
+                handle = cumem_import_from_shareable_handle_close_fd(fd)
+                cumem_map(base_va, scratch.aligned_size, handle)
+                real_handles.append(handle)
+                real_allocation_ids.append(alloc_id)
+                cumem_set_access(
+                    base_va,
+                    scratch.aligned_size,
+                    self.device,
+                    self._granted_lock_type,
+                )
+            except Exception:
+                # Best-effort teardown of whatever we mapped so far.
+                for h in real_handles:
+                    try:
+                        cumem_unmap(base_va, scratch.aligned_size)
+                    except Exception:
+                        pass
+                    try:
+                        cumem_release(h)
+                    except Exception:
+                        pass
+                for aid in real_allocation_ids:
+                    try:
+                        self.free_handle(aid)
+                    except Exception:
+                        pass
+                raise
+
+            scratch.scratch_handle = 0
+            scratch.real_handles = real_handles
+            scratch.real_allocation_ids = real_allocation_ids
+            scratch.state = "real"
+            total_tensors += 1
+
+        logger.info(
+            "[Plan A] Committed real backing: %d scratch mappings -> %d real per-tensor handles",
+            len(self._plan_a_scratch),
+            total_tensors,
+        )
+
+    def destroy_scratch_mapping(self, base_va: int) -> bool:
+        """Tear down a Plan-A allocation (scratch or committed).
+
+        Returns True if the VA was a known Plan-A allocation and was destroyed,
+        False if the VA was not tracked here (caller should fall through to
+        the normal destroy_mapping path).
+        """
+        scratch = self._plan_a_scratch.pop(base_va, None)
+        if scratch is None:
+            return False
+
+        cuda_synchronize()
+
+        if scratch.state == "scratch":
+            try:
+                cumem_unmap(base_va, scratch.aligned_size)
+            except Exception:
+                pass
+            if scratch.scratch_handle:
+                try:
+                    cumem_release(scratch.scratch_handle)
+                except Exception:
+                    pass
+        else:
+            # "real" state: single per-tensor mapping
+            try:
+                cumem_unmap(base_va, scratch.aligned_size)
+            except Exception:
+                pass
+            for h in scratch.real_handles:
+                try:
+                    cumem_release(h)
+                except Exception:
+                    pass
+            if self._granted_lock_type == GrantedLockType.RW:
+                for aid in scratch.real_allocation_ids:
+                    try:
+                        self.free_handle(aid)
+                    except Exception:
+                        pass
+
+        try:
+            cumem_address_free(base_va, scratch.aligned_size)
+        except Exception:
+            pass
+
+        return True
+
+    def unmap_all_scratch(self) -> None:
+        """Drop physical backing for all scratch mappings, keep VAs reserved.
+
+        Currently unused — shadow quiesce today doesn't release the scratch
+        backing because scratch is already only ~2 MiB per tensor. Provided
+        for symmetry with the unmap_all_vas primitive if we ever need it.
+        """
+        cuda_synchronize()
+        for scratch in self._plan_a_scratch.values():
+            if scratch.state != "scratch" or scratch.scratch_handle == 0:
+                continue
+            cumem_unmap(scratch.base_va, scratch.aligned_size)
+            cumem_release(scratch.scratch_handle)
+            scratch.scratch_handle = 0
+            scratch.state = "unmapped"
+
+    @property
+    def has_plan_a_scratch(self) -> bool:
+        """True if any scratch-backed allocation has not yet been committed."""
+        return any(s.state == "scratch" for s in self._plan_a_scratch.values())
+
     # ==================== Lifecycle ====================
 
     def close(self, *, best_effort: bool = False) -> None:
@@ -625,8 +874,11 @@ class GMSClientMemoryManager:
                 pass
             self._mappings.clear()
             self._inverse_mapping.clear()
+            self._plan_a_scratch.clear()
         else:
             cuda_synchronize()
+            for base_va in list(self._plan_a_scratch.keys()):
+                self.destroy_scratch_mapping(base_va)
             for va in list(self._mappings.keys()):
                 self.unmap_va(va)
                 self.free_va(va)

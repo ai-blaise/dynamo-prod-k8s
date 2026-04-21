@@ -132,6 +132,25 @@ def patch_register_kv_caches() -> None:
         if not kv_caches:
             logger.info("[GMS Patch] Skipping KV cache registration (empty kv_caches)")
             return
+        # Plan A: during scratch phase the KV tensors are backed by aliased
+        # scratch physical. NIXL MR registration would pin the scratch page
+        # into an NIC MR that goes stale after commit_real_backing() swaps
+        # to real physical. Defer registration — GMSWorker.wake_up() fires
+        # it after commit via _register_kv_caches_with_nixl.
+        try:
+            from gpu_memory_service.client.torch.allocator import (
+                get_gms_client_memory_manager,
+            )
+
+            kv_mgr = get_gms_client_memory_manager("kv_cache")
+            if kv_mgr is not None and kv_mgr.has_plan_a_scratch:
+                logger.info(
+                    "[GMS Patch] Deferring NIXL KV cache registration (Plan A scratch)"
+                )
+                return
+        except Exception:
+            # If we can't tell, fall through — the original behavior is safe.
+            pass
         return original_register(self, kv_caches)
 
     NixlConnector.register_kv_caches = patched_register_kv_caches

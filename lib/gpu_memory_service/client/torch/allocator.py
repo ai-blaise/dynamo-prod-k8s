@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -38,6 +39,22 @@ _callbacks_initialized = False
 _pluggable_alloc: Any | None = None
 
 
+def _should_use_plan_a_scratch(tag: str) -> bool:
+    """True when this allocation should use Plan-A scratch-aliased backing.
+
+    Gated on:
+      - tag is "kv_cache" (Plan A is KV-specific)
+      - running in shadow mode (DYN_GMS_SHADOW_MODE=1, set by main.py)
+      - DYN_GMS_KV_SCRATCH_MODE != "disabled" (debug bypass for bisection)
+    """
+    if tag != "kv_cache":
+        return False
+    if os.environ.get("DYN_GMS_SHADOW_MODE", "0") != "1":
+        return False
+    mode = os.environ.get("DYN_GMS_KV_SCRATCH_MODE", "aliased").lower()
+    return mode != "disabled"
+
+
 def _gms_malloc(size: int, device: int, stream: int) -> int:
     tag = _active_tag.get()
     if tag is None:
@@ -47,6 +64,13 @@ def _gms_malloc(size: int, device: int, stream: int) -> int:
     if state is None:
         raise RuntimeError(f"Unknown GMS allocation tag: {tag}")
 
+    if _should_use_plan_a_scratch(tag):
+        va = state.manager.create_scratch_mapping(size=int(size), tag=tag)
+        logger.info(
+            "[Plan A malloc] tag=%s va=0x%x size=%d (scratch-aliased)", tag, va, size
+        )
+        return va
+
     va = state.manager.create_mapping(size=int(size), tag=tag)
     logger.debug("[GMS] malloc(tag=%s): va=0x%x size=%d", tag, va, size)
     return va
@@ -54,6 +78,13 @@ def _gms_malloc(size: int, device: int, stream: int) -> int:
 
 def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
     va = int(ptr)
+    # Plan-A scratch-tracked VAs live outside manager.mappings; check first.
+    for tag, state in _tag_states.items():
+        if state.manager.destroy_scratch_mapping(va):
+            logger.debug(
+                "[Plan A free] tag=%s va=0x%x size=%d (scratch)", tag, va, size
+            )
+            return
     for tag, state in _tag_states.items():
         if va not in state.manager.mappings:
             continue
