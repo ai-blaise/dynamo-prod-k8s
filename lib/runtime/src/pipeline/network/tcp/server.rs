@@ -265,12 +265,12 @@ impl TcpStreamServer {
     pub async fn cancel_recv_stream(&self, subject: &str) {
         let mut state = self.state.lock().await;
         state.rx_subjects.remove(subject);
-        if let Some(key) = state.subject_instance.remove(subject) {
-            if let Some(subjects) = state.instance_subjects.get_mut(&key) {
-                subjects.remove(subject);
-                if subjects.is_empty() {
-                    state.instance_subjects.remove(&key);
-                }
+        if let Some(key) = state.subject_instance.remove(subject)
+            && let Some(subjects) = state.instance_subjects.get_mut(&key)
+        {
+            subjects.remove(subject);
+            if subjects.is_empty() {
+                state.instance_subjects.remove(&key);
             }
         }
     }
@@ -438,12 +438,12 @@ impl ResponseService for TcpStreamServer {
                 tokio::spawn(async move {
                     let mut state = cleanup_state.lock().await;
                     state.rx_subjects.remove(&cleanup_subject);
-                    if let Some(key) = state.subject_instance.remove(&cleanup_subject) {
-                        if let Some(subjects) = state.instance_subjects.get_mut(&key) {
-                            subjects.remove(&cleanup_subject);
-                            if subjects.is_empty() {
-                                state.instance_subjects.remove(&key);
-                            }
+                    if let Some(key) = state.subject_instance.remove(&cleanup_subject)
+                        && let Some(subjects) = state.instance_subjects.get_mut(&key)
+                    {
+                        subjects.remove(&cleanup_subject);
+                        if subjects.is_empty() {
+                            state.instance_subjects.remove(&key);
                         }
                     }
                 });
@@ -599,12 +599,12 @@ async fn tcp_listener(
                 .remove(&subject)
                 .ok_or(error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject))?;
             // Clean up instance-tracking maps on the normal (worker-connected) path.
-            if let Some(key) = guard.subject_instance.remove(&subject) {
-                if let Some(subjects) = guard.instance_subjects.get_mut(&key) {
-                    subjects.remove(&subject);
-                    if subjects.is_empty() {
-                        guard.instance_subjects.remove(&key);
-                    }
+            if let Some(key) = guard.subject_instance.remove(&subject)
+                && let Some(subjects) = guard.instance_subjects.get_mut(&key)
+            {
+                subjects.remove(&subject);
+                if subjects.is_empty() {
+                    guard.instance_subjects.remove(&key);
                 }
             }
             conn

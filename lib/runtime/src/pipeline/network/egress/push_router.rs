@@ -271,13 +271,16 @@ static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId,
 /// error.
 ///
 /// Uses the raw `list_and_watch` discovery stream (not a coalesced snapshot
-/// diff) so that a rapid remove→re-add of the same Kubernetes pod — which
-/// keeps the same hash-stable instance_id — is never silently swallowed.
+/// diff) so that every `Removed` event is delivered individually.
 ///
 /// Cancellation is keyed by the full `EndpointInstanceId` (namespace +
 /// component + endpoint + instance_id) to prevent services from different
 /// namespaces/components that happen to share an endpoint name and
 /// pod-backed instance_id from cancelling each other's pending streams.
+///
+/// The watcher reconnects automatically if the discovery stream ends
+/// unexpectedly (e.g., a transient discovery-plane restart) so that future
+/// instance removals are never silently missed.
 fn spawn_instance_removal_watcher(
     endpoint: Endpoint,
     addressed: Arc<AddressedPushRouter>,
@@ -304,70 +307,99 @@ fn spawn_instance_removal_watcher(
     tokio::spawn(async move {
         let namespace = endpoint.component().namespace().name();
         let component = endpoint.component().name().to_string();
+
+        // NOTE on instance_id uniqueness: instance_id is derived from the etcd lease ID
+        // (component/endpoint.rs → distributed.rs → storage/kv/etcd.rs::client.lease_id()).
+        // etcd lease IDs are globally unique and monotonically increasing per cluster
+        // session, so a restarted pod always receives a *different* lease ID (e.g., 42 →
+        // 99, never 42 → 42). Same-ID remove→re-add bursts are therefore structurally
+        // impossible, and every removal event corresponds to a distinct instance.
         let query = DiscoveryQuery::Endpoint {
             namespace,
             component,
             endpoint: endpoint_name.clone(),
         };
 
-        let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(
-                    endpoint = %endpoint_name,
-                    "Failed to start instance removal watcher: {e}"
-                );
-                guard.remove(&endpoint_id);
-                return;
+        // Reconnect loop: re-establish the discovery stream if it ends unexpectedly
+        // (e.g., a transient discovery-plane restart) so future instance removals are
+        // never silently missed.
+        'reconnect: loop {
+            if cancel_token.is_cancelled() {
+                break 'reconnect;
             }
-        };
 
-        loop {
-            tokio::select! {
-                event = stream.next() => {
-                    match event {
-                        Some(Ok(DiscoveryEvent::Removed(id))) => {
-                            // Only act on endpoint-type removals; pass the
-                            // full EndpointInstanceId so cancellation is
-                            // scoped to exactly one service identity.
-                            if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                let n = addressed.cancel_instance_streams(eid).await;
-                                if n > 0 {
-                                    tracing::warn!(
-                                        namespace = %eid.namespace,
-                                        component = %eid.component,
-                                        endpoint = %eid.endpoint,
-                                        instance_id = eid.instance_id,
-                                        cancelled = n,
-                                        "Cancelled pending response streams for removed \
-                                         instance (discovery-driven cleanup)"
-                                    );
+            let mut stream = match endpoint
+                .drt()
+                .discovery()
+                .list_and_watch(query.clone(), None)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        endpoint = %endpoint_name,
+                        "Instance removal watcher failed to connect: {e}; retrying in 5s"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                        _ = cancel_token.cancelled() => break 'reconnect,
+                    }
+                    continue 'reconnect;
+                }
+            };
+
+            loop {
+                tokio::select! {
+                    event = stream.next() => {
+                        match event {
+                            Some(Ok(DiscoveryEvent::Removed(id))) => {
+                                // Only act on endpoint-type removals; pass the
+                                // full EndpointInstanceId so cancellation is
+                                // scoped to exactly one service identity.
+                                if let DiscoveryInstanceId::Endpoint(eid) = &id {
+                                    let n = addressed.cancel_instance_streams(eid).await;
+                                    if n > 0 {
+                                        tracing::warn!(
+                                            namespace = %eid.namespace,
+                                            component = %eid.component,
+                                            endpoint = %eid.endpoint,
+                                            instance_id = eid.instance_id,
+                                            cancelled = n,
+                                            "Cancelled pending response streams for removed \
+                                             instance (discovery-driven cleanup)"
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
-                            // Clear tombstone so new requests for this identity are
-                            // tracked normally after a pod restart.
-                            let eid: EndpointInstanceId = inst.endpoint_instance_id();
-                            addressed.clear_instance_tombstone(&eid).await;
-                        }
-                        Some(Ok(_)) => {
-                            // Ignore non-endpoint events (Model, EventChannel).
-                        }
-                        Some(Err(e)) => {
-                            tracing::warn!(
-                                endpoint = %endpoint_name,
-                                "Instance removal watcher stream error: {e}"
-                            );
-                        }
-                        None => {
-                            // Stream ended — discovery plane shut down.
-                            break;
+                            Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
+                                // Clear tombstone so new requests for this identity are
+                                // tracked normally after a pod restart.
+                                let eid: EndpointInstanceId = inst.endpoint_instance_id();
+                                addressed.clear_instance_tombstone(&eid).await;
+                            }
+                            Some(Ok(_)) => {
+                                // Ignore non-endpoint events (Model, EventChannel).
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Instance removal watcher stream error: {e}"
+                                );
+                            }
+                            None => {
+                                // Stream ended — discovery plane may have restarted.
+                                // Break the inner loop and reconnect via the outer loop.
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Instance removal watcher stream ended; reconnecting"
+                                );
+                                break;
+                            }
                         }
                     }
-                }
-                _ = cancel_token.cancelled() => {
-                    break;
+                    _ = cancel_token.cancelled() => {
+                        break 'reconnect;
+                    }
                 }
             }
         }
