@@ -354,6 +354,85 @@ async def test_connector_waits_for_local_deployment_readiness(connector):
     assert connector.kube_api == mock_kube_api
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "present",
+    [
+        {"POD_NAMESPACE": "ns"},  # DYN_PARENT_DGD_K8S_NAME missing
+        {"DYN_PARENT_DGD_K8S_NAME": "dgd"},  # POD_NAMESPACE missing
+        {},  # both missing
+    ],
+    ids=["missing-dgd-name", "missing-pod-namespace", "both-missing"],
+)
+async def test_wait_for_deployment_ready_skips_when_env_missing(
+    connector, monkeypatch, present
+):
+    """When local deployment context env vars are missing, skip readiness wait."""
+    for var in ("DYN_PARENT_DGD_K8S_NAME", "POD_NAMESPACE"):
+        monkeypatch.delenv(var, raising=False)
+    for k, v in present.items():
+        monkeypatch.setenv(k, v)
+
+    with patch("dynamo.planner.connectors.global_planner.KubernetesAPI") as mock_kube:
+        await connector.wait_for_deployment_ready()
+
+    mock_kube.assert_not_called()
+    assert connector.kube_api is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_deployment_ready_reuses_kube_api_for_same_namespace(connector):
+    """Re-invoking with the same namespace should reuse the existing KubernetesAPI."""
+    existing = MagicMock()
+    existing.current_namespace = "ns"
+    existing.wait_for_graph_deployment_ready = AsyncMock()
+    connector.kube_api = existing
+
+    with patch.dict(
+        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "dgd", "POD_NAMESPACE": "ns"}
+    ):
+        with patch(
+            "dynamo.planner.connectors.global_planner.KubernetesAPI"
+        ) as mock_kube_class:
+            await connector.wait_for_deployment_ready()
+
+    mock_kube_class.assert_not_called()
+    assert connector.kube_api is existing
+    existing.wait_for_graph_deployment_ready.assert_awaited_once_with(
+        "dgd", include_planner=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_deployment_ready_rebuilds_kube_api_on_namespace_change(
+    connector,
+):
+    """A different POD_NAMESPACE should force a fresh KubernetesAPI instance."""
+    stale = MagicMock()
+    stale.current_namespace = "old-ns"
+    stale.wait_for_graph_deployment_ready = AsyncMock()
+    connector.kube_api = stale
+
+    fresh = MagicMock()
+    fresh.wait_for_graph_deployment_ready = AsyncMock()
+
+    with patch.dict(
+        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "dgd", "POD_NAMESPACE": "new-ns"}
+    ):
+        with patch(
+            "dynamo.planner.connectors.global_planner.KubernetesAPI",
+            return_value=fresh,
+        ) as mock_kube_class:
+            await connector.wait_for_deployment_ready()
+
+    mock_kube_class.assert_called_once_with("new-ns")
+    assert connector.kube_api is fresh
+    fresh.wait_for_graph_deployment_ready.assert_awaited_once_with(
+        "dgd", include_planner=True
+    )
+    stale.wait_for_graph_deployment_ready.assert_not_awaited()
+
+
 def test_connector_model_name_and_predicted_load(connector_runtime):
     """Test GlobalPlannerConnector model name and predicted load tracking"""
     # With model name
