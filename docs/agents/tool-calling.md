@@ -211,3 +211,32 @@ tool_call = response.choices[0].message.tool_calls[0].function
 print(f"Function called: {tool_call.name}")
 print(f"Arguments: {tool_call.arguments}")
 ```
+
+## Background: why Rust parsers?
+
+Two motivations, recorded for historical reference.
+
+**Backend independence** -- [issue #2151](https://github.com/ai-dynamo/dynamo/issues/2151),
+opened by Elyas Mehtabuddin on 2025-07-28:
+
+> We would like to support tool calling in dynamo for any backend and not rely
+> on vllm or any specific backend to support tool calling. [...] we can build
+> some fundamental building blocks and create easy to implement parsers for
+> different models in rust.
+
+Before #2151, tool calling only worked by flag-passthrough to vLLM's Python
+parser (PRs [#1756](https://github.com/ai-dynamo/dynamo/pull/1756),
+[#1800](https://github.com/ai-dynamo/dynamo/pull/1800)). The Rust choice was
+stated without further justification at the time -- the load-bearing argument
+was backend independence.
+
+**Avoiding Python GIL overhead** -- added later in
+[PR #6834](https://github.com/ai-dynamo/dynamo/pull/6834) by Ishan Dhanani
+on 2026-03-09, when the SGLang chat-processor swap shipped (see
+[SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md)):
+
+> native parsers avoid the Python GIL overhead entirely
+
+Both framings hold today: the Rust parsers give backend independence *and*
+avoid GIL overhead, which is why Option A in
+[Chat Processor Options](chat-processor-options.md) is the default path.
