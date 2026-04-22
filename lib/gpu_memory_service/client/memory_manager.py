@@ -642,18 +642,23 @@ class GMSClientMemoryManager:
     def create_scratch_mapping(self, size: int, tag: str = "kv_cache") -> int:
         """Reserve VA range and back it with ONE aliased physical chunk.
 
-        Used by the shadow engine at init time so torch.zeros on the full
-        kv_cache size succeeds without paying the real memory cost. Server is
-        not involved — the scratch handle is client-local (cuMemCreate without
-        export/import). At wake, call commit_real_backing() to swap in real
-        per-chunk handles at the same VAs.
+        Purely client-local — does not require a GMS server connection. At
+        wake, commit_real_backing() connects as RW and swaps scratch for real
+        per-tensor handles at the same VAs.
+
+        This is used by the shadow engine at init so torch.zeros on the full
+        kv_cache size succeeds without paying the real memory cost AND
+        without competing for the kv_cache RW lock with sibling shadows (only
+        the engine that wins the flock connects RW, at wake).
 
         Returns the base VA. Writes to any offset in [va, va+size) succeed
         and land on the shared scratch page; reads return whatever was last
-        written. Capture semantics are unaffected because cudagraphs record
-        VAs, not physical addresses.
+        written. Cudagraphs capture VAs, not physical, so they survive the
+        scratch→real swap.
         """
-        self._require_rw()
+        # Note: deliberately NOT calling _require_rw(). Scratch is process-local
+        # CUDA VMM; the GMS lock only matters for server-backed operations in
+        # commit_real_backing and destroy_scratch_mapping's free_handle path.
         aligned_size = align_to_granularity(size, self.granularity)
         if aligned_size % self.granularity != 0:
             raise ValueError(
@@ -673,10 +678,12 @@ class GMSClientMemoryManager:
         va = cumem_address_reserve(aligned_size, self.granularity)
 
         # Map the single scratch handle at every granule of the VA range.
+        # Scratch is process-local and always needs RW access for torch.zeros
+        # and kernel writes — independent of any GMS-granted lock mode.
         try:
             for offset in range(0, aligned_size, self.granularity):
                 cumem_map(va + offset, self.granularity, scratch_handle)
-            cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
+            cumem_set_access(va, aligned_size, self.device, GrantedLockType.RW)
         except Exception:
             # On partial failure, best-effort teardown and re-raise.
             try:
