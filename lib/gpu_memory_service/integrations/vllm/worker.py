@@ -352,28 +352,41 @@ class GMSWorker(Worker):
     def _register_kv_caches_with_nixl(self) -> None:
         """Fire the NixlConnector KV-cache registration after Plan A swap.
 
-        During scratch phase the patches.patch_register_kv_caches gate suppresses
-        the initial register call (backing isn't real yet). Once commit_real_backing
-        has installed unique per-chunk physical, we call the original registration
-        against model_runner.kv_caches.
+        During scratch phase the patches.patch_register_kv_caches gate intercepts
+        register_kv_caches(dict) and stashes the dict on the connector as
+        self._plan_a_pending_kv_caches. We replay that here, NOT
+        self.model_runner.kv_caches — the latter is the list-of-tensors view
+        set by vLLM, and NixlConnector.register_kv_caches does kv_caches.values()
+        which requires the dict form.
+
+        Imports from the package root (vllm.distributed.kv_transfer) — the
+        kv_connector.v1.base re-exports were unreliable across vLLM versions,
+        and a silent except ImportError here would make this a no-op,
+        leaving NixlConnectorWorker.kv_topo=None and crashing on the first
+        scheduler tick. See DYN-2714 commit 6174e090f5c for history.
         """
-        try:
-            from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-                get_kv_transfer_group,
-                has_kv_transfer_group,
-            )
-        except ImportError:
-            return
+        from vllm.distributed.kv_transfer import (
+            get_kv_transfer_group,
+            has_kv_transfer_group,
+        )
+
         if not has_kv_transfer_group():
             return
-        kv_caches = getattr(self.model_runner, "kv_caches", None)
-        if not kv_caches:
-            return
         group = get_kv_transfer_group()
-        group.register_kv_caches(kv_caches)
+        pending = getattr(group, "_plan_a_pending_kv_caches", None)
+        if not pending:
+            # Nothing was stashed — either no deferred registration, or a
+            # non-NixlConnector connector that didn't hit the patched path.
+            return
+        group.register_kv_caches(pending)
+        # Drop the stash so a second call is a no-op.
+        try:
+            delattr(group, "_plan_a_pending_kv_caches")
+        except AttributeError:
+            pass
         logger.info(
             "[Plan A] Registered %d kv_cache tensors with KV transfer group",
-            len(kv_caches),
+            len(pending),
         )
 
     def _maybe_get_memory_pool_context(self, tag: str):

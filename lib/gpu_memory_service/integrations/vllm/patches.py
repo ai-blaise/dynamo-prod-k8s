@@ -137,6 +137,11 @@ def patch_register_kv_caches() -> None:
         # into an NIC MR that goes stale after commit_real_backing() swaps
         # to real physical. Defer registration — GMSWorker.wake_up() fires
         # it after commit via _register_kv_caches_with_nixl.
+        #
+        # We must stash the caller's dict here because vLLM's
+        # GPUModelRunner.kv_caches attribute stores the LIST view
+        # (list(dict.values())), and NixlConnector.register_kv_caches needs
+        # the dict form (it does kv_caches.values()).
         try:
             from gpu_memory_service.client.torch.allocator import (
                 get_gms_client_memory_manager,
@@ -144,8 +149,11 @@ def patch_register_kv_caches() -> None:
 
             kv_mgr = get_gms_client_memory_manager("kv_cache")
             if kv_mgr is not None and kv_mgr.has_plan_a_scratch:
+                self._plan_a_pending_kv_caches = kv_caches
                 logger.info(
-                    "[GMS Patch] Deferring NIXL KV cache registration (Plan A scratch)"
+                    "[GMS Patch] Deferring NIXL KV cache registration "
+                    "(Plan A scratch; stashed %d layers for wake replay)",
+                    len(kv_caches),
                 )
                 return
         except Exception:
