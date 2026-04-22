@@ -70,6 +70,7 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
         # The handler expects token_ids, stop_conditions, and sampling_options
         self.default_payload = {
             "token_ids": [bos_token_id],
+            "priority": 1.0,  # Highest TRT-LLM priority — health check must not be starved
             "stop_conditions": {
                 "max_tokens": 1,  # Generate only 1 token
                 "stop": None,
