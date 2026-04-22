@@ -13,6 +13,7 @@ pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
 pub const HEADER_DP_RANK: &str = "x-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+pub const HEADER_TENANT_ID: &str = "x-tenant-id";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 /// Apply routing overrides from HTTP headers to nvext.
@@ -22,6 +23,7 @@ const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
 /// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
 /// - `x-prefill-dp-rank` -> `prefill_dp_rank`
+/// - `x-tenant-id` -> `cache_salt` (multi-tenant KV cache isolation)
 ///
 /// Headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -47,7 +49,17 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
-    if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
+    let tenant_id = headers
+        .get(HEADER_TENANT_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty());
+
+    if worker_id.is_none()
+        && prefill_id.is_none()
+        && dp_rank.is_none()
+        && prefill_dp_rank.is_none()
+        && tenant_id.is_none()
     {
         return nvext;
     }
@@ -65,6 +77,9 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     }
     if let Some(rank) = prefill_dp_rank {
         ext.prefill_dp_rank = Some(rank);
+    }
+    if let Some(tenant) = tenant_id {
+        ext.cache_salt = Some(tenant);
     }
     Some(ext)
 }
@@ -211,12 +226,16 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<SessionControl>,
 
-    /// Cache salt for multi-tenant KV cache isolation.
-    /// When set, blocks hashed with different salts produce distinct hashes,
-    /// preventing cross-tenant cache reuse. Forwarded to the engine so it
-    /// appears in KV cache events.
+    /// Multi-tenant KV cache isolation namespace.
+    ///
+    /// Populated from the `x-tenant-id` HTTP header by
+    /// [`apply_header_routing_overrides`]; not accepted from request bodies.
+    /// Kept on `NvExt` only as an internal carrier that flows through the
+    /// preprocessor into `RoutingHints.cache_namespace` and ultimately into
+    /// the engine's block-hash computation.
     #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip)]
+    #[schema(ignore)]
     pub cache_salt: Option<String>,
 }
 
@@ -422,6 +441,7 @@ mod tests {
         headers.insert(HEADER_PREFILL_INSTANCE_ID, "456".parse().unwrap());
         headers.insert(HEADER_DP_RANK, "3".parse().unwrap());
         headers.insert(HEADER_PREFILL_DP_RANK, "5".parse().unwrap());
+        headers.insert(HEADER_TENANT_ID, "tenant-A".parse().unwrap());
 
         let result = apply_header_routing_overrides(None, &headers).unwrap();
 
@@ -430,5 +450,78 @@ mod tests {
         assert_eq!(result.prefill_worker_id, Some(456));
         assert_eq!(result.dp_rank, Some(3));
         assert_eq!(result.prefill_dp_rank, Some(5));
+        assert_eq!(result.cache_salt.as_deref(), Some("tenant-A"));
+    }
+
+    /// `x-tenant-id` alone must trigger NvExt creation even when no
+    /// worker/dp-rank headers are set.
+    #[test]
+    fn test_apply_header_routing_overrides_tenant_only() {
+        use axum::http::HeaderMap;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-B".parse().unwrap());
+
+        let result = apply_header_routing_overrides(None, &headers).unwrap();
+        assert_eq!(result.cache_salt.as_deref(), Some("tenant-B"));
+        assert_eq!(result.backend_instance_id, None);
+    }
+
+    /// Empty `x-tenant-id` must be treated as absent (no override applied).
+    #[test]
+    fn test_apply_header_routing_overrides_empty_tenant_ignored() {
+        use axum::http::HeaderMap;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "".parse().unwrap());
+
+        assert!(apply_header_routing_overrides(None, &headers).is_none());
+    }
+
+    /// Header must overwrite a value already on the incoming nvext (header
+    /// wins, same semantics as the other routing-override headers).
+    #[test]
+    fn test_apply_header_routing_overrides_tenant_header_wins() {
+        use axum::http::HeaderMap;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "from-header".parse().unwrap());
+
+        let existing = NvExt::builder()
+            .cache_salt("from-nvext".to_string())
+            .build()
+            .unwrap();
+
+        let result = apply_header_routing_overrides(Some(existing), &headers).unwrap();
+        assert_eq!(result.cache_salt.as_deref(), Some("from-header"));
+    }
+
+    /// A JSON body with `nvext.cache_salt` must be silently dropped during
+    /// deserialization — cache_salt is header-only now.
+    #[test]
+    fn test_cache_salt_is_not_deserialized_from_json() {
+        let body = serde_json::json!({
+            "nvext": {
+                "cache_salt": "client-sent"
+            }
+        });
+        let outer: serde_json::Value = body;
+        let nvext: NvExt = serde_json::from_value(outer["nvext"].clone()).unwrap();
+        assert_eq!(nvext.cache_salt, None);
+    }
+
+    /// Symmetric to the above — cache_salt set internally must not leak back
+    /// onto the wire via serialization of NvExt.
+    #[test]
+    fn test_cache_salt_is_not_serialized_to_json() {
+        let ext = NvExt::builder()
+            .cache_salt("internal".to_string())
+            .build()
+            .unwrap();
+        let json = serde_json::to_value(&ext).unwrap();
+        assert!(
+            json.get("cache_salt").is_none(),
+            "cache_salt must not appear in serialized NvExt, got: {json}"
+        );
     }
 }
