@@ -59,6 +59,11 @@ const (
 	// concerns at build time.
 	mainContainerName = "main"
 
+	// defaultFrontendSidecarContainerName is the v1alpha1 default container
+	// name synthesised by buildPodTemplateTo when a v1alpha1 FrontendSidecarSpec
+	// is converted into a podTemplate sidecar + FrontendSidecar name reference.
+	defaultFrontendSidecarContainerName = "sidecar-frontend"
+
 	// defaultGPUResourceName is the v1alpha1 default when a user sets
 	// Resources.{Requests,Limits}.GPU without specifying GPUType.
 	defaultGPUResourceName = corev1.ResourceName("nvidia.com/gpu")
@@ -406,7 +411,7 @@ func convertSharedSpecFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst
 	convertSharedMemoryFrom(src.SharedMemorySize, dst, c)
 
 	// compilationCache + podTemplate volumeMounts -> VolumeMounts.
-	convertVolumeMountsFrom(src, dst, c)
+	convertVolumeMountsFrom(src, dst)
 
 	// experimental -> GPUMemoryService, Failover, Checkpoint.
 	convertExperimentalFrom(src, dst, c)
@@ -490,7 +495,7 @@ func convertSharedMemoryFrom(src *resource.Quantity, dst *DynamoComponentDeploym
 // a CompilationCacheConfig. Non-cache mounts on the main container are
 // preserved through decomposePodTemplate's ExtraPodSpec.MainContainer copy,
 // not here.
-func convertVolumeMountsFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+func convertVolumeMountsFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
 	if src.CompilationCache == nil {
 		return
 	}
@@ -759,13 +764,13 @@ func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.D
 	// container to podTemplate.containers (as a user sidecar) if not already
 	// present, and set FrontendSidecar to its name.
 	if src.FrontendSidecar != nil {
-		name := appendFrontendSidecar(podTpl, src.FrontendSidecar)
+		appendFrontendSidecar(podTpl, src.FrontendSidecar)
 		// Stash origin so ConvertFrom can reproduce the full spec on the
 		// v1alpha1 side without depending on the podTemplate sidecar.
 		if data, err := json.Marshal(src.FrontendSidecar); err == nil {
 			c.set(suffixFrontendSidecar, string(data))
 		}
-		dst.FrontendSidecar = ptr.To(name)
+		dst.FrontendSidecar = ptr.To(defaultFrontendSidecarContainerName)
 		// Drop any stale v1beta1-first ref annotation; the origin annotation
 		// is authoritative in this direction.
 		c.del(suffixFrontendSidecarRef)
@@ -944,24 +949,24 @@ func containerIsEmpty(c *corev1.Container) bool {
 		c.TerminationMessagePolicy == "" &&
 		c.ImagePullPolicy == "" &&
 		c.SecurityContext == nil &&
-		c.Stdin == false &&
-		c.StdinOnce == false &&
-		c.TTY == false
+		!c.Stdin &&
+		!c.StdinOnce &&
+		!c.TTY
 }
 
-// appendFrontendSidecar ensures a container with a stable name exists in the
-// podTemplate's container list. The chosen name is either the v1alpha1 default
-// "sidecar-frontend" or "<existing-name>" if a container with that name is
-// already present. Returns the chosen name.
-func appendFrontendSidecar(podTpl *corev1.PodTemplateSpec, fs *FrontendSidecarSpec) string {
-	name := "sidecar-frontend"
+// appendFrontendSidecar ensures a container named
+// defaultFrontendSidecarContainerName exists in the podTemplate's container
+// list, synthesising one from the v1alpha1 FrontendSidecarSpec when absent.
+// Callers use defaultFrontendSidecarContainerName directly for the resulting
+// name reference.
+func appendFrontendSidecar(podTpl *corev1.PodTemplateSpec, fs *FrontendSidecarSpec) {
 	for _, ctr := range podTpl.Spec.Containers {
-		if ctr.Name == name {
-			return name
+		if ctr.Name == defaultFrontendSidecarContainerName {
+			return
 		}
 	}
 	ctr := corev1.Container{
-		Name:  name,
+		Name:  defaultFrontendSidecarContainerName,
 		Image: fs.Image,
 		Args:  slices.Clone(fs.Args),
 		Env:   slices.Clone(fs.Envs),
@@ -974,7 +979,6 @@ func appendFrontendSidecar(podTpl *corev1.PodTemplateSpec, fs *FrontendSidecarSp
 		})
 	}
 	podTpl.Spec.Containers = append(podTpl.Spec.Containers, ctr)
-	return name
 }
 
 // podSpecIsZero reports whether a PodSpec has no fields set. This is a cheap
@@ -996,7 +1000,7 @@ func podSpecIsZero(p *corev1.PodSpec) bool {
 		p.PriorityClassName == "" &&
 		p.RuntimeClassName == nil &&
 		p.RestartPolicy == "" &&
-		p.HostNetwork == false &&
+		!p.HostNetwork &&
 		p.Hostname == "" &&
 		p.Subdomain == "" &&
 		p.DNSPolicy == ""
