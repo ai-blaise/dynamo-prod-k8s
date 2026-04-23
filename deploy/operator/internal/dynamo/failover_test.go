@@ -204,16 +204,20 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	}
 }
 
-// --- isFailoverEnabled ---
+// --- IsFailoverEnabled ---
 
 func TestIsFailoverEnabled(t *testing.T) {
-	assert.True(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	assert.True(t, IsFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: true},
 	}))
-	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	assert.False(t, IsFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: false},
 	}))
-	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
+	assert.False(t, IsFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
+}
+
+func TestFailoverEngineContainerNames(t *testing.T) {
+	assert.Equal(t, []string{"engine-0", "engine-1"}, FailoverEngineContainerNames())
 }
 
 func envToMap(envs []corev1.EnvVar) map[string]string {

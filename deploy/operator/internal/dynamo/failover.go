@@ -23,8 +23,22 @@ const (
 	failoverEngineCount = 2
 )
 
-func isFailoverEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+// IsFailoverEnabled reports whether the given component spec requests the
+// intra-pod engine-0/engine-1 failover topology.
+func IsFailoverEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
 	return component.Failover != nil && component.Failover.Enabled
+}
+
+// FailoverEngineContainerNames returns the container names produced by the
+// failover pod transform, in order. Used by the checkpoint/restore wiring
+// to stamp the snapshot-target-containers annotation so the snapshot agent
+// restores the single checkpoint into every engine in the pod.
+func FailoverEngineContainerNames() []string {
+	names := make([]string, 0, failoverEngineCount)
+	for i := 0; i < failoverEngineCount; i++ {
+		names = append(names, fmt.Sprintf("engine-%d", i))
+	}
+	return names
 }
 
 // buildFailoverPod clones the main container into two engine containers (active + standby).
