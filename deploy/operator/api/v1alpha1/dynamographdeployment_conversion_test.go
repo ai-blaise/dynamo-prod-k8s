@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
@@ -1074,6 +1075,62 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	}
 }
 
+// newIdempotenceDGDFixture returns a representative v1beta1 DGD covering the
+// shape that originally surfaced the generation-bump regression in-cluster:
+// an aggregated frontend+worker service pair where the frontend has no
+// explicit container resources (so `containers[*].resources` projects as an
+// empty object) and `sharedMemorySize="0"` (which exercises the Disabled=true
+// path in convertSharedMemoryFrom). It is shared by the idempotence tests
+// below so the linter does not flag the identical fixture builders as dupl.
+func newIdempotenceDGDFixture() *v1beta1.DynamoGraphDeployment {
+	replicas := int32(1)
+	return &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "conv-smoke", Namespace: "jsm"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: []v1beta1.DynamoComponentDeploymentService{
+				{
+					Name: "frontend",
+					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+						ComponentType:    v1beta1.ComponentTypeFrontend,
+						Replicas:         &replicas,
+						FrontendSidecar:  ptr.To("sidecar-frontend"),
+						SharedMemorySize: ptr.To(resource.MustParse("0")),
+						PodTemplate: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "nvcr.io/nvidia/dynamo:latest"},
+									{Name: "sidecar-frontend", Image: "nvcr.io/nvidia/dynamo-frontend:latest"},
+								},
+							},
+						},
+					},
+				},
+				{
+					Name: "worker",
+					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+						ComponentType: v1beta1.ComponentTypeWorker,
+						Replicas:      &replicas,
+						PodTemplate: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "main",
+									Image: "nvcr.io/nvidia/dynamo:latest",
+									Resources: corev1.ResourceRequirements{
+										Limits: corev1.ResourceList{
+											"nvidia.com/gpu": resource.MustParse("1"),
+										},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 // TestDGD_ApplyIdempotence_GenerationBump simulates the server-side flow that
 // kubectl apply drives on every invocation: the v1beta1 payload is converted
 // to v1alpha1 for storage, stored (i.e. JSON-marshaled and unmarshaled), and
@@ -1089,57 +1146,10 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 // ConvertFrom's output must be reflect.DeepEqual-stable across an etcd JSON
 // round-trip, so kubectl apply is idempotent for any v1beta1 input.
 func TestDGD_ApplyIdempotence_GenerationBump(t *testing.T) {
-	replicas := int32(1)
 	// sharedMemorySize=\"0\" is the critical trigger: it exercises the
 	// Disabled=true path in convertSharedMemoryFrom, which previously left
 	// SharedMemorySpec.Size as a bare Quantity{}.
-	newSrc := func() *v1beta1.DynamoGraphDeployment {
-		return &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "conv-smoke", Namespace: "jsm"},
-			Spec: v1beta1.DynamoGraphDeploymentSpec{
-				BackendFramework: "vllm",
-				Services: []v1beta1.DynamoComponentDeploymentService{
-					{
-						Name: "frontend",
-						DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-							ComponentType:    v1beta1.ComponentTypeFrontend,
-							Replicas:         &replicas,
-							FrontendSidecar:  ptr.To("sidecar-frontend"),
-							SharedMemorySize: ptr.To(resource.MustParse("0")),
-							PodTemplate: &corev1.PodTemplateSpec{
-								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{
-										{Name: "main", Image: "nvcr.io/nvidia/dynamo:latest"},
-										{Name: "sidecar-frontend", Image: "nvcr.io/nvidia/dynamo-frontend:latest"},
-									},
-								},
-							},
-						},
-					},
-					{
-						Name: "worker",
-						DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-							ComponentType: v1beta1.ComponentTypeWorker,
-							Replicas:      &replicas,
-							PodTemplate: &corev1.PodTemplateSpec{
-								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{{
-										Name:  "main",
-										Image: "nvcr.io/nvidia/dynamo:latest",
-										Resources: corev1.ResourceRequirements{
-											Limits: corev1.ResourceList{
-												"nvidia.com/gpu": resource.MustParse("1"),
-											},
-										},
-									}},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-	}
+	newSrc := newIdempotenceDGDFixture
 
 	// First apply: simulates the initial create path.
 	stored := &DynamoGraphDeployment{}
@@ -1236,5 +1246,116 @@ func TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin(t *testing.T) {
 
 	if !reflect.DeepEqual(storedAfterEtcd.Spec, reapplied.Spec) {
 		t.Errorf("empty-SharedMemorySpec reapply is not DeepEqual to post-etcd form; kubectl apply will bump generation on every invocation.\nstored.spec = %#v\nreapplied.spec = %#v", storedAfterEtcd.Spec, reapplied.Spec)
+	}
+}
+
+// TestDGD_ApplyIdempotence_CSAMergePatch reproduces the *exact* kubectl
+// client-side-apply flow the API server drives on every `kubectl apply`
+// against the v1beta1 endpoint. The JSON merge patch step is what strips
+// `podTemplate.metadata: {}` and `containers[*].resources: {}` from the
+// v1beta1 projection before ConvertFrom runs, so the post-merge v1beta1 can
+// differ structurally from the pre-merge v1beta1; any asymmetry between the
+// converted ExtraPodSpec shape and the stored ExtraPodSpec shape will drift
+// `.spec` and cause `.metadata.generation` to bump on every re-apply. The
+// `v1beta1.MarshalJSON` normalizer neutralizes that asymmetry by stripping
+// the `{}` artefacts before they hit the wire; this test is the regression
+// guard against a future change that re-introduces them.
+//
+// The patch body below is the literal bytes captured from `kubectl apply -v=9`
+// applying a representative DGD fixture that uses an aggregated (frontend +
+// worker) service pair with no explicit `podTemplate.metadata` or container
+// resources on the frontend container -- the shape that originally surfaced
+// the generation-bump regression in-cluster.
+func TestDGD_ApplyIdempotence_CSAMergePatch(t *testing.T) {
+	userB1 := newIdempotenceDGDFixture
+
+	// This is the literal patch body kubectl client-side-apply sends for
+	// the fixture above, captured with `kubectl apply -v=9` at the v1beta1
+	// endpoint. Arrays are replaced wholesale by JSON merge patch (RFC
+	// 7396), so every reapply strips the `podTemplate.metadata: {}`
+	// and `containers[*].resources: {}` fields that the server's v1beta1
+	// projection adds.
+	csaPatch := []byte(`{"spec":{"services":[` +
+		`{"componentType":"frontend","frontendSidecar":"sidecar-frontend","name":"frontend","podTemplate":{"spec":{"containers":[{"image":"nvcr.io/nvidia/dynamo:latest","name":"main"},{"image":"nvcr.io/nvidia/dynamo-frontend:latest","name":"sidecar-frontend"}]}},"replicas":1,"sharedMemorySize":"0"},` +
+		`{"componentType":"worker","name":"worker","podTemplate":{"spec":{"containers":[{"image":"nvcr.io/nvidia/dynamo:latest","name":"main","resources":{"limits":{"nvidia.com/gpu":"1"}}}]}},"replicas":1}` +
+		`]}}`)
+
+	// Step 1: first apply. Server ConvertsFrom the user's v1beta1 to
+	// produce the stored v1alpha1 object.
+	stored := &DynamoGraphDeployment{}
+	if err := stored.ConvertFrom(userB1()); err != nil {
+		t.Fatalf("first ConvertFrom (create): %v", err)
+	}
+	storedBytes, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal stored: %v", err)
+	}
+	storedAfterEtcd := &DynamoGraphDeployment{}
+	if err := json.Unmarshal(storedBytes, storedAfterEtcd); err != nil {
+		t.Fatalf("unmarshal stored: %v", err)
+	}
+
+	// Step 2: second apply. Server reads stored, converts to v1beta1 so
+	// the JSON merge patch can be applied at the request version.
+	serverB1 := &v1beta1.DynamoGraphDeployment{}
+	if err := storedAfterEtcd.ConvertTo(serverB1); err != nil {
+		t.Fatalf("server ConvertTo: %v", err)
+	}
+	serverB1Bytes, err := json.Marshal(serverB1)
+	if err != nil {
+		t.Fatalf("marshal serverB1: %v", err)
+	}
+
+	// Step 3: apply JSON merge patch. Arrays are replaced wholesale.
+	patchedB1Bytes, err := jsonpatch.MergePatch(serverB1Bytes, csaPatch)
+	if err != nil {
+		t.Fatalf("merge patch: %v", err)
+	}
+	patchedB1 := &v1beta1.DynamoGraphDeployment{}
+	if err := json.Unmarshal(patchedB1Bytes, patchedB1); err != nil {
+		t.Fatalf("unmarshal patched: %v", err)
+	}
+
+	// Step 4: server converts back to v1alpha1 for storage. This is
+	// `new` in PrepareForUpdate(new, old).
+	next := &DynamoGraphDeployment{}
+	if err := next.ConvertFrom(patchedB1); err != nil {
+		t.Fatalf("server ConvertFrom (write): %v", err)
+	}
+
+	// Step 5: apiserver generation-bump check.
+	// The apiserver compares old["spec"] vs new["spec"] as unstructured
+	// maps (apiequality.Semantic.DeepEqual). We model that by marshalling
+	// both sides to JSON and comparing the byte forms, which is what the
+	// apiserver effectively does after a JSON round-trip of the webhook
+	// response.
+	storedJSON, _ := json.Marshal(storedAfterEtcd.Spec)
+	nextJSON, _ := json.Marshal(next.Spec)
+	if string(storedJSON) != string(nextJSON) {
+		t.Errorf("CSA merge-patch flow drifted spec; kubectl apply will bump .metadata.generation on every invocation.\nstored=%s\nnext  =%s", storedJSON, nextJSON)
+	}
+	if diff := cmp.Diff(storedAfterEtcd.Spec, next.Spec); diff != "" {
+		t.Errorf("CSA merge-patch flow drifted spec (Go-level):\n(-stored +next):\n%s", diff)
+	}
+	if !reflect.DeepEqual(storedAfterEtcd.Annotations, next.Annotations) {
+		t.Errorf("annotations drift across CSA merge-patch flow:\nstored=%#v\nnext  =%#v", storedAfterEtcd.Annotations, next.Annotations)
+	}
+
+	// Step 6: mimic the apiserver's unstructured-level comparison. The
+	// generation bump in PrepareForUpdate is driven by
+	// apiequality.Semantic.DeepEqual on the `spec` subtree decoded as
+	// map[string]interface{}. Byte-equal JSON is sufficient for that to
+	// match, but Go's json.Marshal and apimachinery's unstructured decoder
+	// use different field ordering conventions; re-decoding via the same
+	// path the apiserver uses surfaces any residual structural drift.
+	var oldMap, newMap map[string]interface{}
+	if err := json.Unmarshal(storedJSON, &oldMap); err != nil {
+		t.Fatalf("unmarshal stored spec: %v", err)
+	}
+	if err := json.Unmarshal(nextJSON, &newMap); err != nil {
+		t.Fatalf("unmarshal next spec: %v", err)
+	}
+	if !reflect.DeepEqual(oldMap, newMap) {
+		t.Errorf("unstructured spec DeepEqual mismatch after CSA merge-patch flow:\nold=%#v\nnew=%#v", oldMap, newMap)
 	}
 }
