@@ -19,6 +19,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -1070,5 +1071,170 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	got := roundTripFromV1alpha1(t, src)
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("Checkpoint empty-payload round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestDGD_ApplyIdempotence_GenerationBump simulates the server-side flow that
+// kubectl apply drives on every invocation: the v1beta1 payload is converted
+// to v1alpha1 for storage, stored (i.e. JSON-marshaled and unmarshaled), and
+// then a second apply of the same v1beta1 payload runs ConvertFrom again.
+//
+// The API server increments `.metadata.generation` only when reflect.DeepEqual
+// reports that oldSpec and newSpec differ. A resource.Quantity that was
+// populated by Go zero-initialization is NOT reflect.DeepEqual to the same
+// numeric value after a JSON round-trip (the latter carries canonical Format
+// / cached-string state that the former lacks), so a ConvertFrom that emits
+// bare Quantity{} values produces a spec that churns on every apply even when
+// the user-visible bytes are identical. This test pins the invariant that
+// ConvertFrom's output must be reflect.DeepEqual-stable across an etcd JSON
+// round-trip, so kubectl apply is idempotent for any v1beta1 input.
+func TestDGD_ApplyIdempotence_GenerationBump(t *testing.T) {
+	replicas := int32(1)
+	// sharedMemorySize=\"0\" is the critical trigger: it exercises the
+	// Disabled=true path in convertSharedMemoryFrom, which previously left
+	// SharedMemorySpec.Size as a bare Quantity{}.
+	newSrc := func() *v1beta1.DynamoGraphDeployment {
+		return &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "conv-smoke", Namespace: "jsm"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: []v1beta1.DynamoComponentDeploymentService{
+					{
+						Name: "frontend",
+						DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+							ComponentType:    v1beta1.ComponentTypeFrontend,
+							Replicas:         &replicas,
+							FrontendSidecar:  ptr.To("sidecar-frontend"),
+							SharedMemorySize: ptr.To(resource.MustParse("0")),
+							PodTemplate: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{Name: "main", Image: "nvcr.io/nvidia/dynamo:latest"},
+										{Name: "sidecar-frontend", Image: "nvcr.io/nvidia/dynamo-frontend:latest"},
+									},
+								},
+							},
+						},
+					},
+					{
+						Name: "worker",
+						DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+							ComponentType: v1beta1.ComponentTypeWorker,
+							Replicas:      &replicas,
+							PodTemplate: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{{
+										Name:  "main",
+										Image: "nvcr.io/nvidia/dynamo:latest",
+										Resources: corev1.ResourceRequirements{
+											Limits: corev1.ResourceList{
+												"nvidia.com/gpu": resource.MustParse("1"),
+											},
+										},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	// First apply: simulates the initial create path.
+	stored := &DynamoGraphDeployment{}
+	if err := stored.ConvertFrom(newSrc()); err != nil {
+		t.Fatalf("first ConvertFrom: %v", err)
+	}
+
+	// Simulate etcd: marshal to JSON (what the API server does before handing
+	// the object to the storage layer) and unmarshal back into a fresh
+	// v1alpha1 value. This canonicalizes any embedded resource.Quantity.
+	data, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal stored: %v", err)
+	}
+	storedAfterEtcd := &DynamoGraphDeployment{}
+	if err := json.Unmarshal(data, storedAfterEtcd); err != nil {
+		t.Fatalf("unmarshal stored: %v", err)
+	}
+
+	// Second apply: the server materializes the same v1beta1 spec and runs
+	// ConvertFrom again; the result must DeepEqual the post-etcd form, or
+	// the API server will bump .metadata.generation.
+	reapplied := &DynamoGraphDeployment{}
+	if err := reapplied.ConvertFrom(newSrc()); err != nil {
+		t.Fatalf("second ConvertFrom: %v", err)
+	}
+
+	if !reflect.DeepEqual(storedAfterEtcd.Spec, reapplied.Spec) {
+		t.Errorf("second apply is not DeepEqual to stored form after JSON round-trip; kubectl apply will bump generation on every invocation.\nstored.spec = %#v\nreapplied.spec = %#v", storedAfterEtcd.Spec, reapplied.Spec)
+	}
+
+	if !reflect.DeepEqual(storedAfterEtcd.Annotations, reapplied.Annotations) {
+		t.Errorf("annotations drift between applies.\nstored = %#v\nreapplied = %#v", storedAfterEtcd.Annotations, reapplied.Annotations)
+	}
+}
+
+// TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin pins the twin invariant for
+// the `&SharedMemorySpec{}` -> v1beta1 empty-origin annotation path. The empty
+// struct has `Size: resource.Quantity{}` which serializes to "0" (Quantity is
+// a non-pointer struct, so encoding/json's omitempty does not drop it); after
+// the etcd JSON round-trip the Size becomes a canonical zero Quantity that is
+// not reflect.DeepEqual to the Go zero value. Without the fix in
+// convertSharedMemoryFrom, every reapply of a v1beta1 object carrying the
+// empty-origin annotation would bump .metadata.generation.
+func TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin(t *testing.T) {
+	// Seed a v1alpha1 object whose only non-default bit is SharedMemory =
+	// &SharedMemorySpec{}, then run it through ConvertTo once so the
+	// produced v1beta1 carries the "shared-memory-origin=empty" annotation
+	// we need to exercise the empty branch of convertSharedMemoryFrom.
+	a1 := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "shm-empty", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					SharedMemory:  &SharedMemorySpec{},
+				},
+			},
+		},
+	}
+	b1 := &v1beta1.DynamoGraphDeployment{}
+	if err := a1.ConvertTo(b1); err != nil {
+		t.Fatalf("seed ConvertTo: %v", err)
+	}
+	// Sanity: the empty-origin annotation is what triggers the path we want
+	// to cover; fail loudly if future refactors break the assumption.
+	if _, ok := b1.Annotations["nvidia.com/dgd-svc-worker-shared-memory-origin"]; !ok {
+		t.Fatalf("expected shared-memory-origin=empty annotation on v1beta1, got: %#v", b1.Annotations)
+	}
+
+	// First apply: ConvertFrom takes the empty branch and produces the
+	// v1alpha1 object that the API server will store in etcd.
+	stored := &DynamoGraphDeployment{}
+	if err := stored.ConvertFrom(b1); err != nil {
+		t.Fatalf("first ConvertFrom: %v", err)
+	}
+
+	data, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal stored: %v", err)
+	}
+	storedAfterEtcd := &DynamoGraphDeployment{}
+	if err := json.Unmarshal(data, storedAfterEtcd); err != nil {
+		t.Fatalf("unmarshal stored: %v", err)
+	}
+
+	// Second apply of the same v1beta1 payload must produce a spec that is
+	// reflect.DeepEqual to the stored-and-reloaded form, or the API server
+	// will bump .metadata.generation on every apply.
+	reapplied := &DynamoGraphDeployment{}
+	if err := reapplied.ConvertFrom(b1); err != nil {
+		t.Fatalf("second ConvertFrom: %v", err)
+	}
+
+	if !reflect.DeepEqual(storedAfterEtcd.Spec, reapplied.Spec) {
+		t.Errorf("empty-SharedMemorySpec reapply is not DeepEqual to post-etcd form; kubectl apply will bump generation on every invocation.\nstored.spec = %#v\nreapplied.spec = %#v", storedAfterEtcd.Spec, reapplied.Spec)
 	}
 }

@@ -457,7 +457,16 @@ func convertSharedMemoryFrom(src *resource.Quantity, dst *DynamoComponentDeploym
 	if v, ok := c.get(suffixSharedMemOrigin); ok {
 		c.del(suffixSharedMemOrigin)
 		if v == "empty" {
-			dst.SharedMemory = &SharedMemorySpec{}
+			// A bare SharedMemorySpec{} carries Size: Quantity{}, which
+			// serializes to "0" because resource.Quantity is a non-pointer
+			// struct (encoding/json's `omitempty` does not treat structs
+			// as empty). After the etcd JSON round-trip, Size comes back
+			// as a canonical zero Quantity that is NOT reflect.DeepEqual
+			// to the Go zero value, which would cause every
+			// kubectl apply to bump `.metadata.generation`. Emit the
+			// canonical zero form directly so reapplies are idempotent.
+			// See convertSharedMemoryFrom(disabled) for the twin case.
+			dst.SharedMemory = &SharedMemorySpec{Size: resource.MustParse("0")}
 			return
 		}
 	}
@@ -467,7 +476,16 @@ func convertSharedMemoryFrom(src *resource.Quantity, dst *DynamoComponentDeploym
 	if src.Sign() == 0 {
 		// Canonical v1beta1 "size=0" <-> v1alpha1 Disabled=true. See
 		// convertSharedMemoryTo for the forward direction.
-		dst.SharedMemory = &SharedMemorySpec{Disabled: true}
+		//
+		// Size is carried as the DeepCopy of the incoming canonical Quantity
+		// (not the Go zero value) so that every apply produces a spec that is
+		// reflect.DeepEqual to what's in etcd. A bare Quantity{} and a
+		// JSON-round-tripped Quantity serialize identically to "0" but differ
+		// in internal state (Format, cached string), and the API server's
+		// generation-bump check uses DeepEqual -- so emitting a bare
+		// Quantity{} here would cause every `kubectl apply` to bump
+		// `.metadata.generation` even though the spec is byte-identical.
+		dst.SharedMemory = &SharedMemorySpec{Disabled: true, Size: src.DeepCopy()}
 		return
 	}
 	dst.SharedMemory = &SharedMemorySpec{Size: src.DeepCopy()}
