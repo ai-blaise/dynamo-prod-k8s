@@ -8195,8 +8195,8 @@ spec:
                           x-kubernetes-int-or-string: true
                       type: object
                       x-kubernetes-validations:
-                        - message: sharedMemory.size must not be set when sharedMemory.disabled is true
-                          rule: '!(has(self.disabled) && self.disabled && has(self.size))'
+                        - message: sharedMemory.size must not be set to a non-zero value when sharedMemory.disabled is true
+                          rule: '!(has(self.disabled) && self.disabled && has(self.size) && self.size != ''0'')'
                     ttlSecondsAfterFinished:
                       description: |-
                         Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
