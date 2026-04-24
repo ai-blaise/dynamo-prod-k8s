@@ -110,7 +110,7 @@ spec:
           set +e
           aiperf profile \
             -m "nvidia/DeepSeek-V3.2-NVFP4" \
-            --tokenizer "nvidia/DeepSeek-V3.2-NVFP4" \
+            --tokenizer "deepseek-ai/DeepSeek-V3.2" \
             --url "http://${ENDPOINT}" \
             --streaming \
             --ui dashboard \
@@ -130,7 +130,7 @@ spec:
           echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting trace replay benchmark"
           aiperf profile \
             -m "nvidia/DeepSeek-V3.2-NVFP4" \
-            --tokenizer "nvidia/DeepSeek-V3.2-NVFP4" \
+            --tokenizer "deepseek-ai/DeepSeek-V3.2" \
             --input-file "${TRACE_FILE}" \
             --custom-dataset-type mooncake_trace \
             --fixed-schedule \
