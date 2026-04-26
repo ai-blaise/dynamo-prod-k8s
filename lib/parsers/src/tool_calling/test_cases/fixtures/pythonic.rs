@@ -15,6 +15,9 @@ fn render_args(arguments: &Value) -> String {
         .map(|(k, v)| {
             let v_str = match v {
                 Value::String(s) => format!("\"{s}\""),
+                Value::Bool(true) => "True".to_string(),
+                Value::Bool(false) => "False".to_string(),
+                Value::Null => "None".to_string(),
                 _ => v.to_string(),
             };
             format!("{k}={v_str}")

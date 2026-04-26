@@ -41,8 +41,12 @@ impl CanonicalCall {
             .strip_prefix("functions.")
             .unwrap_or(&call.function.name)
             .to_string();
-        let arguments: Value =
-            serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+        // On parse failure, surface the raw payload under a sentinel key so a
+        // regressing parser shows up in test output as `__unparseable_arguments__`
+        // instead of being indistinguishable from a literal JSON `null`.
+        let arguments: Value = serde_json::from_str(&call.function.arguments).unwrap_or_else(
+            |_| serde_json::json!({ "__unparseable_arguments__": call.function.arguments }),
+        );
         Self { name, arguments }
     }
 }
