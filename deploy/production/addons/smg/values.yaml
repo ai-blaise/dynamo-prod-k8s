@@ -5,7 +5,7 @@
 #
 # Boundary contract:
 #
-#   client -> SMG -> Dynamo Frontend -> SGLang prefill / decode -> HiSparse / TurboQuant
+#   client -> SMG -> Dynamo Frontend -> SGLang prefill / decode -> HiSparse / HIGGS
 #
 # SMG is configured here as an HTTP gateway in front of the Dynamo Frontend
 # Service. It does not own tokenization, detokenization, reasoning parsing,
@@ -35,7 +35,7 @@ router:
 
   # Model identity surfaced to clients via /v1/models. Keep this aligned with
   # --served-model-name in deploy/production/examples/deepseek-v32-reap-sglang.yaml.
-  model: BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+  model: BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
 
   maxPayloadSize: 536870912
   requestTimeoutSecs: 1800

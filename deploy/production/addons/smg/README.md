@@ -37,7 +37,7 @@ Those capabilities must remain in Dynamo, SGLang, or external application layers
 
 - The 4-GPU prefill plus 4-GPU decode disaggregation in [`examples/deepseek-v32-reap-sglang.yaml`](../../examples/deepseek-v32-reap-sglang.yaml).
 - Dynamo Frontend's `--router-mode kv --router-kv-events --router-reset-states` configuration.
-- HiSparse, IndexCache, TurboQuant, and SMC-SD worker configuration.
+- HiSparse, HF-declared HIGGS/NVFP4 IndexCache+HISA, and SMC-SD worker configuration.
 - SGLang worker ownership of GPU inference processes.
 
 ## Why `policy: round_robin` And Not `cache_aware`
@@ -69,7 +69,7 @@ kubectl -n smg port-forward svc/smg-router 8080:80
 curl -sS http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1",
+    "model": "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4",
     "messages": [{"role": "user", "content": "Reply with exactly: pong"}],
     "max_tokens": 8
   }'

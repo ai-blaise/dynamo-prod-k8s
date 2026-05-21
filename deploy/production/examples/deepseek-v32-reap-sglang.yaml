@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# DeepSeek V3.2 REAP W4A4KV4 NVFP4 on the Dynamo production profile.
+# DeepSeek V3.2 REAP SpinQuant ActKV NVFP4 on the Dynamo production profile.
 #
 # This A4 deployment uses disaggregated SGLang serving with one 4-GPU prefill
 # role and one 4-GPU decode role on a single 8-GPU B200 node. The deployment
-# keeps DP attention, event-backed KV-aware routing, IndexCache, dense
-# TurboQuant, and decode-side HiSparse. HiCache is intentionally omitted because
-# HiSparse requires the no-radix decode path. The checkpoint remains W4A4KV4
-# NVFP4; target KV uses BF16 source dtype with dense TurboQuant 2.5-bit storage.
+# keeps DP attention, event-backed KV-aware routing, HF-declared HIGGS dense
+# MLA KV, HF-declared NVFP4 IndexCache+HISA, and decode-side HiSparse. HiCache
+# is intentionally omitted because HiSparse requires the no-radix decode path.
 # Speculation is decode-only through SMC-SD. LayerSplit is not enabled in this
 # 4+4 DP=4 profile because the prefill worker does not have effective CP>1.
 apiVersion: nvidia.com/v1alpha1
@@ -117,7 +116,7 @@ spec:
         volumes:
           - name: deepseek-v32-reap-model
             hostPath:
-              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
               type: Directory
         mainContainer:
           image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
@@ -129,9 +128,9 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
             - --served-model-name
-            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
             - --host
             - 0.0.0.0
             - --trust-remote-code
@@ -168,15 +167,6 @@ spec:
             - flashmla_sparse
             - --nsa-decode-backend
             - flashmla_sparse
-            - --nsa-indexer-mode
-            - indexcache
-            - --nsa-indexcache-pattern
-            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
-            - --enable-turboquant-dense-kv-cache
-            - --turboquant-dense-kv-preset
-            - latent_2p5bit_nc
-            - --turboquant-execution-mode
-            - fused_decode
             - --disaggregation-mode
             - prefill
             - --disaggregation-transfer-backend
@@ -205,7 +195,7 @@ spec:
             failureThreshold: 360
           volumeMounts:
             - name: deepseek-v32-reap-model
-              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
               readOnly: true
     decode:
       componentType: worker
@@ -227,7 +217,7 @@ spec:
         volumes:
           - name: deepseek-v32-reap-model
             hostPath:
-              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
               type: Directory
           - name: smcsd-draft-model
             hostPath:
@@ -243,9 +233,9 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
             - --served-model-name
-            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
             - --host
             - 0.0.0.0
             - --trust-remote-code
@@ -283,15 +273,6 @@ spec:
             - flashmla_sparse
             - --nsa-decode-backend
             - flashmla_sparse
-            - --nsa-indexer-mode
-            - indexcache
-            - --nsa-indexcache-pattern
-            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
-            - --enable-turboquant-dense-kv-cache
-            - --turboquant-dense-kv-preset
-            - latent_2p5bit_nc
-            - --turboquant-execution-mode
-            - fused_decode
             - --enable-hisparse
             - --hisparse-config
             - '{"top_k":2048,"device_buffer_size":6144,"host_to_device_ratio":10}'
@@ -345,7 +326,7 @@ spec:
             failureThreshold: 360
           volumeMounts:
             - name: deepseek-v32-reap-model
-              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
               readOnly: true
             - name: smcsd-draft-model
               mountPath: /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
