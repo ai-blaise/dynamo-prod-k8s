@@ -31,6 +31,11 @@ daemon:
   metricsPort: 9100
   rpcPort: 9101
   hostRoot: /var/lib/dynamo-snapshots
+  # A4 production uses k3s, whose kubelet client certs and containerd
+  # socket live under k3s-owned paths rather than kubeadm defaults.
+  kubeletCheckpointsPath: /var/lib/kubelet/checkpoints
+  kubeletPkiPath: /var/lib/rancher/k3s/agent
+  containerdSocketPath: /run/k3s/containerd/containerd.sock
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 512Mi }
