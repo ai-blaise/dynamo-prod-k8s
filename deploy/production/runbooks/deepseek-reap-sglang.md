@@ -170,7 +170,7 @@ only on decode:
 ```bash
 --disable-radix-cache \
 --enable-hisparse \
---hisparse-config '{"top_k":2048,"device_buffer_size":6144,"host_to_device_ratio":10}' \
+--hisparse-config '{"top_k":1024,"device_buffer_size":6144,"host_to_device_ratio":10}' \
 --speculative-algorithm SMC
 ```
 
