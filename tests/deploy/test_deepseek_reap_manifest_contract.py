@@ -30,14 +30,20 @@ FRONTEND_MAIN = (
 )
 MODEL_CARD = Path(__file__).resolve().parents[2] / "lib" / "llm" / "src" / "model_card.rs"
 TARGET_MODEL = (
-    "BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-"
-    "IndexerK8-FP8-GatedNorm-G1"
+    "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4"
 )
 
 
+def _manifest() -> dict:
+    return yaml.safe_load(MANIFEST.read_text())
+
+
+def _service_for(service_name: str) -> dict:
+    return _manifest()["spec"]["services"][service_name]
+
+
 def _args_for(service_name: str) -> list[str]:
-    manifest = yaml.safe_load(MANIFEST.read_text())
-    service = manifest["spec"]["services"][service_name]
+    service = _service_for(service_name)
     return service["extraPodSpec"]["mainContainer"]["args"]
 
 
@@ -74,8 +80,16 @@ def test_deepseek_reap_frontend_uses_event_backed_kv_routing():
     assert "--no-router-kv-events" not in args
 
 
-def test_deepseek_reap_workers_keep_combined_indexcache_turboquant_hisparse_pd_contract():
-    for service_name, mode in (("prefill", "prefill"), ("decode", "decode")):
+def test_deepseek_reap_workers_keep_selected_setup2_custom_stack_contract():
+    assert _service_for("prefill")["replicas"] == 1
+    assert _service_for("prefill")["resources"]["limits"]["gpu"] == "4"
+    assert _service_for("decode")["replicas"] == 2
+    assert _service_for("decode")["resources"]["limits"]["gpu"] == "2"
+
+    for service_name, mode, tp, mem_fraction in (
+        ("prefill", "prefill", "4", "0.66"),
+        ("decode", "decode", "2", "0.64"),
+    ):
         args = _args_for(service_name)
 
         assert _arg_value(args, "--disaggregation-mode") == mode
@@ -84,28 +98,33 @@ def test_deepseek_reap_workers_keep_combined_indexcache_turboquant_hisparse_pd_c
         assert _arg_value(args, "--dyn-reasoning-parser") == "deepseek_r1"
         assert _arg_value(args, "--served-model-name") == TARGET_MODEL
         assert _arg_value(args, "--model-path") == f"/models/{TARGET_MODEL}"
-        assert _arg_value(args, "--tp") == "4"
-        assert _arg_value(args, "--dp") == "4"
-        assert "--enable-dp-attention" in args
+        assert _arg_value(args, "--tp") == tp
+        assert _arg_value(args, "--dp") == "1"
+        assert "--enable-dp-attention" not in args
         assert _arg_value(args, "--quantization") == "compressed-tensors"
         assert "--kv-events-config" in args
         assert _arg_value(args, "--kv-cache-dtype") == "bfloat16"
-        assert _arg_value(args, "--nsa-prefill-backend") == "flashmla_sparse"
-        assert _arg_value(args, "--nsa-decode-backend") == "flashmla_sparse"
+        assert _arg_value(args, "--nsa-prefill-backend") == "tokenspeed_mla"
+        assert _arg_value(args, "--nsa-decode-backend") == "tokenspeed_mla"
+        assert _arg_value(args, "--mem-fraction-static") == mem_fraction
+        assert _arg_value(args, "--max-running-requests") == "32"
+        assert _arg_value(args, "--context-length") == "140000"
+        assert _arg_value(args, "--max-total-tokens") == "1048576"
+        assert _arg_value(args, "--cuda-graph-max-bs") == "48"
 
         assert "--enable-hierarchical-cache" not in args
-        assert "--nsa-prefill-cp-kv-storage-mode" not in args
-        assert "--nsa-prefill-cp-layersplit-layout" not in args
-        assert _arg_value(args, "--nsa-indexer-mode") == "indexcache"
-        assert _arg_value(args, "--nsa-indexcache-pattern") == (
-            "FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF"
-        )
-        assert "--enable-turboquant-dense-kv-cache" in args
-        assert _arg_value(args, "--turboquant-dense-kv-preset") == "latent_2p5bit_nc"
-        assert _arg_value(args, "--turboquant-execution-mode") == "fused_decode"
+        assert "--json-model-override-args" not in args
+        assert "--nsa-indexer-mode" not in args
+        assert "--enable-turboquant-dense-kv-cache" not in args
+        assert "--turboquant-dense-kv-preset" not in args
+        assert "--disable-cuda-graph" not in args
 
     prefill_args = _args_for("prefill")
     decode_args = _args_for("decode")
+
+    assert "--enable-dsa-prefill-context-parallel" in prefill_args
+    assert _arg_value(prefill_args, "--attention-context-parallel-size") == "4"
+    assert _arg_value(prefill_args, "--dsa-prefill-cp-kv-storage-mode") == "layersplit"
 
     assert "--enable-hisparse" not in prefill_args
     assert "--disable-radix-cache" not in prefill_args
@@ -113,6 +132,12 @@ def test_deepseek_reap_workers_keep_combined_indexcache_turboquant_hisparse_pd_c
     assert "--enable-hisparse" in decode_args
     assert "--disable-radix-cache" in decode_args
     assert "--hisparse-config" in decode_args
+    assert '"top_k":1024' in _arg_value(decode_args, "--hisparse-config")
+
+    envs = {item["name"]: item["value"] for item in _manifest()["spec"]["envs"]}
+    assert envs["SGLANG_ENABLE_WARP_DECODE"] == "1"
+    assert envs["SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER"] == "1"
+    assert envs["UCX_TLS"] == "cuda_copy,cuda_ipc,tcp"
 
 
 def test_deepseek_reap_smc_is_decode_only():

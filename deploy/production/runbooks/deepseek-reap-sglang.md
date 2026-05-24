@@ -7,20 +7,25 @@ SPDX-License-Identifier: Apache-2.0
 
 This runbook validates `BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4` on the Dynamo production Kubernetes profile with the SGLang backend from `ai-blaise/optimization-playground`.
 
-The active topology runs on one A4 node with eight allocatable B200 GPUs: four GPUs for prefill and four GPUs for decode. The production profile uses decode-side HiSparse plus the target model's HF-declared HIGGS dense MLA KV and NVFP4 IndexCache+HISA paths from `ai-blaise/optimization-playground`:
+The active topology runs on one A4 node with eight allocatable B200 GPUs: one
+4-GPU prefill worker and two 2-GPU decode replicas. The production profile uses
+decode-side HiSparse plus the target model's HF-declared HIGGS dense MLA KV and
+NVFP4 IndexCache+HISA paths from `ai-blaise/optimization-playground`:
 
 - target checkpoint: SpinQuant ActKV NVFP4 through the checkpoint's `compressed-tensors` quantization metadata
 - target KV source dtype: BF16, with HIGGS dense 2-bit MLA KV storage declared by `quantization_config.kv_cache_scheme`
 - decode-side HiSparse via `--enable-hisparse`
 - NVFP4 IndexCache+HISA via `quantization_config.indexer_quantization`
-- DSA sparse attention backends via `--nsa-prefill-backend flashmla_sparse` and `--nsa-decode-backend flashmla_sparse`
+- TokenSpeed MLA attention backends via `--nsa-prefill-backend tokenspeed_mla` and `--nsa-decode-backend tokenspeed_mla`
 - no SGLang HiCache in this profile because HiSparse requires the decode no-radix path
-- no LayerSplit flags in this 4+4 DP=4 profile because the prefill worker does not have effective attention CP size greater than 1
+- LayerSplit on the prefill worker via `--enable-dsa-prefill-context-parallel`, `--attention-context-parallel-size 4`, and `--dsa-prefill-cp-kv-storage-mode layersplit`
+- WarpDecode enabled through `SGLANG_ENABLE_WARP_DECODE=1`
+- FlashSampling and NCCLX are not enabled in this production profile
 - Dynamo event-backed KV-aware routing via frontend `--router-mode kv --router-kv-events` and worker `--kv-events-config`
 - Dynamo-native chat preprocessing via frontend `--dyn-chat-processor dynamo` and worker parser flags `--dyn-tool-call-parser deepseek_v3_2 --dyn-reasoning-parser deepseek_r1`
 - Dynamo Frontend tokenization via `--tokenizer fastokens`, with HuggingFace decoding and fallback behavior handled inside Dynamo
-- prefill: `--disaggregation-mode prefill`, `--dp 4`, `--tp 4`, DP attention enabled
-- decode: `--disaggregation-mode decode`, `--dp 4`, `--tp 4`, DP attention enabled, radix cache disabled as required by HiSparse
+- prefill: `--disaggregation-mode prefill`, `--dp 1`, `--tp 4`, `--mem-fraction-static 0.66`, `--max-running-requests 32`
+- decode: `--disaggregation-mode decode`, `--dp 1`, `--tp 2`, two replicas, `--mem-fraction-static 0.64`, `--max-running-requests 32`, radix cache disabled as required by HiSparse
 - SMC-SD draft on decode only: `BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP`, FP8 draft KV, CUTLASS draft FP8 GEMM
 
 Compatibility note: SGLang documents HiSparse as a decode-side DSA/PD feature
@@ -151,12 +156,16 @@ python3 -m dynamo.sglang \
   --served-model-name BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4 \
   --quantization compressed-tensors \
   --kv-cache-dtype bfloat16 \
-  --tp 4 \
-  --dp 4 \
-  --enable-dp-attention \
+  --tp 4|2 \
+  --dp 1 \
+  --mem-fraction-static 0.66|0.64 \
+  --max-running-requests 32 \
+  --context-length 140000 \
+  --max-total-tokens 1048576 \
+  --cuda-graph-max-bs 48 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
-  --nsa-prefill-backend flashmla_sparse \
-  --nsa-decode-backend flashmla_sparse \
+  --nsa-prefill-backend tokenspeed_mla \
+  --nsa-decode-backend tokenspeed_mla \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 12345 \
   --disaggregation-mode prefill|decode \

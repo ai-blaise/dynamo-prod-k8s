@@ -35,9 +35,9 @@ Those capabilities must remain in Dynamo, SGLang, or external application layers
 
 ## What This Addon Does Not Change
 
-- The 4-GPU prefill plus 4-GPU decode disaggregation in [`examples/deepseek-v32-reap-sglang.yaml`](../../examples/deepseek-v32-reap-sglang.yaml).
-- Dynamo Frontend's `--router-mode kv --router-kv-events --router-reset-states` configuration.
-- HiSparse, HF-declared HIGGS/NVFP4 IndexCache+HISA, and SMC-SD worker configuration.
+- The one 4-GPU prefill plus two 2-GPU decode replica disaggregation in [`examples/deepseek-v32-reap-sglang.yaml`](../../examples/deepseek-v32-reap-sglang.yaml).
+- Dynamo Frontend's `--router-mode kv --router-kv-events --router-reset-states --tokenizer fastokens` configuration.
+- HiSparse, HF-declared HIGGS/NVFP4 IndexCache+HISA, TokenSpeed MLA, LayerSplit, WarpDecode, and SMC-SD worker configuration.
 - SGLang worker ownership of GPU inference processes.
 
 ## Why `policy: round_robin` And Not `cache_aware`
