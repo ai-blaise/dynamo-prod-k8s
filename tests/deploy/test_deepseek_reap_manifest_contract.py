@@ -118,6 +118,9 @@ def test_deepseek_reap_workers_keep_selected_setup2_custom_stack_contract():
         assert "--enable-turboquant-dense-kv-cache" not in args
         assert "--turboquant-dense-kv-preset" not in args
         assert "--disable-cuda-graph" not in args
+        assert "--load-format" not in args
+        assert "--remote-instance-weight-loader-backend" not in args
+        assert "--modelexpress-config" not in args
 
     prefill_args = _args_for("prefill")
     decode_args = _args_for("decode")

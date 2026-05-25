@@ -30,6 +30,7 @@ Each add-on under [`addons/`](addons/) has an individual README that records its
 | Backup and restore | Velero | Owns cluster-resource and PV backup/restore. |
 | External secrets | External Secrets Operator | Owns provider-specific secret synchronization. |
 | Multinode scheduling | Grove + KAI Scheduler | Recommended Dynamo path for topology-aware gang scheduling. |
+| Model cache and P2P metadata | ModelExpress | Owns model download/cache coordination and optional remote-instance metadata. |
 | HTTP gateway | SMG | Owns the OpenAI-compatible gateway in front of Dynamo Frontend. |
 | GitOps | Argo CD | Owns delivery, drift correction, promotion, and audit trail. |
 
@@ -47,6 +48,7 @@ Each add-on under [`addons/`](addons/) has an individual README that records its
 | External Secrets Operator | `https://charts.external-secrets.io` | `2.4.0` |
 | KAI Scheduler | `ghcr.io/kai-scheduler/kai-scheduler` | `v0.14.0` |
 | Grove | `ghcr.io/ai-dynamo/grove` | `v0.1.0-alpha.8` |
+| ModelExpress | `https://github.com/ai-dynamo/modelexpress.git` | `0.3.0` at `9fd703e` |
 | SMG | `https://github.com/lightseekorg/smg.git` | `v1.4.1` |
 | Dynamo PrometheusRules | Repository manifests | `main` |
 

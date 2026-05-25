@@ -109,6 +109,50 @@ hf download \
 
 The pod sets `HF_HUB_OFFLINE=1`; model access failures should be fixed during host-side download, not at runtime.
 
+## ModelExpress Cache and P2P Modes
+
+The production stack deploys ModelExpress and wires Dynamo through the native
+operator setting `dynamo-operator.modelExpressURL`. With the default manifest,
+workers still use absolute `/models/...` paths, so ModelExpress is present but
+not on the hot path.
+
+The A4 infrastructure wrapper owns the opt-in modes:
+
+```bash
+REAP_ENABLE_MODELEXPRESS=1 scripts/dynamo-reap/deploy-a4-production.sh
+```
+
+That mode renders the main worker `--model-path` as the Hugging Face repo id,
+mounts the shared `/models` cache, and sets:
+
+```text
+HF_HOME=/models
+HF_HUB_CACHE=/models/hub
+MODEL_EXPRESS_CACHE_PATH=/models/hub
+```
+
+Dynamo then calls its native `fetch_model()` path before SGLang starts. The SMC
+draft remains the local hostPath unless `REAP_MODELEXPRESS_SMC_DRAFT=1` is set;
+with that flag, the renderer changes `--speculative-draft-model-path` to the
+draft Hugging Face repo id and Dynamo prefetches it through the same
+ModelExpress path.
+
+SGLang remote-instance P2P loading is separate and must stay opt-in:
+
+```bash
+REAP_ENABLE_MODELEXPRESS=1 \
+REAP_MODELEXPRESS_P2P=1 \
+REAP_MODELEXPRESS_TRANSPORT=nixl \
+scripts/dynamo-reap/deploy-a4-production.sh
+```
+
+The P2P mode adds `--load-format remote_instance`,
+`--remote-instance-weight-loader-backend modelexpress`, and
+`--modelexpress-config` to prefill and decode workers. It also requires the
+runtime image to contain the ModelExpress Python package. Do not make this the
+default until it has been validated with compressed-tensors NVFP4, HiSparse,
+LayerSplit, and decode-only SMC-SD.
+
 ## Engine Image
 
 Build the runtime image from `ai-blaise/optimization-playground` after the remaining custom kernels are added. The manifest defaults to:

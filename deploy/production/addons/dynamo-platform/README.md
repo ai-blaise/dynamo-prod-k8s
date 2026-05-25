@@ -26,12 +26,13 @@ This values file configures the Dynamo platform chart for the production GitOps 
 | Dynamo discovery | `dynamo-operator.discoveryBackend: kubernetes`. |
 | Admission posture | Webhook `failurePolicy: Fail`, `timeoutSeconds: 10`. |
 | Metrics integration | Operator points at `http://kube-prometheus-stack-prometheus.monitoring.svc:9090`. |
+| ModelExpress integration | Operator injects `MODEL_EXPRESS_URL=http://modelexpress.modelexpress.svc.cluster.local:8001` into generated pods. |
 | Scheduler integration | Grove and KAI are enabled for the platform chart but not installed by it. |
 | Embedded dependencies | `global.etcd.install: false`; external etcd is not installed by this profile. |
 
 ## What This Addon Does Not Own
 
-- It does not install GPU Operator, Prometheus, Loki, Fluentd, Falco, Trivy, Velero, External Secrets, Grove, KAI, or SMG. Those are separate Argo CD apps.
+- It does not install GPU Operator, Prometheus, Loki, Fluentd, Falco, Trivy, Velero, External Secrets, Grove, KAI, ModelExpress, or SMG. Those are separate Argo CD apps.
 - It does not own the production DeepSeek REAP `DynamoGraphDeployment`; that lives under [`examples/`](../../examples/).
 - It does not own secrets or external model storage.
 

@@ -14,6 +14,7 @@ resources:
   - apps/40-velero.yaml
   - apps/50-kai-scheduler.yaml
   - apps/51-grove.yaml
+  - apps/56-modelexpress.yaml
   - apps/60-dynamo-prometheus-rules.yaml
   - apps/70-smg.yaml
   - apps/90-dynamo-platform.yaml

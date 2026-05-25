@@ -19,6 +19,7 @@ dynamo-operator:
   dynamo:
     metrics:
       prometheusEndpoint: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+  modelExpressURL: http://modelexpress.modelexpress.svc.cluster.local:8001
   controllerManager:
     manager:
       image:

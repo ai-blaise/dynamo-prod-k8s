@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ModelExpress cache / metadata service. Sync wave 56: after the CRIU snapshot
+# CRDs; the A4 infrastructure wrapper waits for production apps before applying
+# the REAP DynamoGraphDeployment.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: modelexpress
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "56"
+spec:
+  project: dynamo-production
+  sources:
+    - repoURL: https://github.com/ai-dynamo/modelexpress.git
+      targetRevision: 9fd703ede7eb0a04b538c6edcb973507a523fd5c
+      path: examples
+      directory:
+        include: crds.yaml
+    - repoURL: https://github.com/ai-dynamo/modelexpress.git
+      targetRevision: 9fd703ede7eb0a04b538c6edcb973507a523fd5c
+      path: helm
+      helm:
+        releaseName: modelexpress
+        valueFiles:
+          - $values/deploy/production/addons/modelexpress/values.yaml
+    - repoURL: https://github.com/ai-blaise/dynamo-prod-k8s.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: modelexpress
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

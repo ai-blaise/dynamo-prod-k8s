@@ -332,6 +332,14 @@ async def parse_args(args: list[str]) -> Config:
     if not os.path.exists(model_path):
         await fetch_model(model_path)
 
+    speculative_draft_model_path = getattr(
+        parsed_args, "speculative_draft_model_path", None
+    )
+    if speculative_draft_model_path and not os.path.exists(
+        speculative_draft_model_path
+    ):
+        await fetch_model(speculative_draft_model_path)
+
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_model (download the model) here, in `parse_args`. `parse_args` should not
     # contain code to download a model, it should only parse the args.

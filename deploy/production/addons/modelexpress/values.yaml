@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ModelExpress model cache and optional P2P metadata service for the REAP lane.
+# The first production integration uses the shared host /models cache and
+# Dynamo's native MODEL_EXPRESS_URL injection. SGLang remote-instance P2P stays
+# opt-in through the infrastructure renderer.
+
+replicaCount: 1
+
+image:
+  repository: nvcr.io/nvidia/ai-dynamo/modelexpress-server
+  tag: "0.3.0"
+  pullPolicy: IfNotPresent
+
+# The upstream image is hosted on NVCR. Create this secret in the modelexpress
+# namespace or override the image to an ai-blaise-published mirror.
+imagePullSecrets:
+  - name: nvcr-secret
+
+serviceAccount:
+  create: true
+  automount: true
+  rbac:
+    enabled: true
+
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 8001
+
+env:
+  MODEL_EXPRESS_SERVER_PORT: "8001"
+  MODEL_EXPRESS_LOG_LEVEL: info
+  MODEL_EXPRESS_LOGGING_LEVEL: info
+  MODEL_EXPRESS_CACHE_DIRECTORY: /models/hub
+  MODEL_EXPRESS_CACHE_EVICTION_ENABLED: "false"
+  MX_METADATA_BACKEND: kubernetes
+  MX_METADATA_NAMESPACE: modelexpress
+  POD_NAMESPACE: modelexpress
+
+extraEnv:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: hf-token-secret
+        key: HF_TOKEN
+        optional: true
+
+persistence:
+  enabled: false
+
+extraVolumes:
+  - name: model-cache-host
+    hostPath:
+      path: /models
+      type: DirectoryOrCreate
+
+extraVolumeMounts:
+  - name: model-cache-host
+    mountPath: /models
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 4Gi
+    ephemeral-storage: 4Gi
+  limits:
+    cpu: "8"
+    memory: 16Gi
+    ephemeral-storage: 16Gi
+
+nodeSelector:
+  kubernetes.io/hostname: a4-us-001-rl9
+
+tolerations:
+  - operator: Exists

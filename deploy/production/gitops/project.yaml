@@ -27,6 +27,7 @@ spec:
     - https://github.com/kubernetes-sigs/lws
     - https://volcano-sh.github.io/helm-charts
     - https://github.com/ai-blaise/criu-snapshots.git
+    - https://github.com/ai-dynamo/modelexpress.git
     # Shepherd Model Gateway (SMG): client-facing OpenAI-compatible
     # gateway in front of the Dynamo Frontend. Chart lives in the
     # upstream git repo; see addons/smg/ for the boundary contract.
