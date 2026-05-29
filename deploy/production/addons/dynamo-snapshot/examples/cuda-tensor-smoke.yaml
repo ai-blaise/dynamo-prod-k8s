@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Single-GPU PyTorch + CUDA tensor smoke fixture for the upstream Dynamo
+# Snapshot pipeline. Pairs with cuda-tensor-smoke-script.py mounted via
+# ConfigMap. Run with:
+#
+#   kubectl -n dynamo-system create configmap cuda-smoke-script \
+#       --from-file=script.py=cuda-tensor-smoke-script.py
+#   kubectl apply -f cuda-tensor-smoke.yaml
+#   snapshotctl checkpoint --manifest cuda-tensor-smoke.yaml \
+#       --container main --checkpoint-id cuda-smoke-1 \
+#       --disable-cuda-checkpoint-job-file
+#   snapshotctl restore --manifest cuda-tensor-smoke.yaml \
+#       --checkpoint-id cuda-smoke-1 --containers main
+#
+# After restore, the resumed pod's log should show the iteration counter
+# resuming from where it stopped at checkpoint time AND tensor.sum still
+# == 8386560 (sum(range(4096))). Both prove CRIU restored the Python
+# heap + the CUDA HBM contents survived the round trip.
+#
+# The container image must ship cuda-checkpoint, nsrestore, and criu on
+# $PATH; see the runbook for the Dockerfile snippet. --disable-cuda-
+# checkpoint-job-file is needed against NVIDIA's published cuda-checkpoint
+# v580.105.08, which does not yet implement --launch-job; the agent's
+# own cuda-checkpoint-helper still drives cuCheckpointProcessLock/
+# Checkpoint on the live PID, so single-GPU HBM capture works fully.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cuda-snap-smoke
+  namespace: dynamo-system
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  containers:
+    - name: main
+      image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4-dynamo-1.1.1-v9
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "/scripts/script.py"]
+      env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "0"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+        requests:
+          nvidia.com/gpu: "1"
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+  volumes:
+    - name: scripts
+      configMap:
+        name: cuda-smoke-script

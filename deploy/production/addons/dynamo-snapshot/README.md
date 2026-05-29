@@ -59,11 +59,25 @@ helm install dynamo-snapshot deploy/helm/charts/snapshot \
 The Argo CD `Application` at `deploy/production/gitops/apps/56-dynamo-snapshot.yaml`
 manages this for the canonical `dynamo-system` install.
 
-## Runbook
+## Runbook + verified examples
 
 See [`deploy/production/runbooks/dynamo-snapshot.md`](../../runbooks/dynamo-snapshot.md)
 for the verified checkpoint + restore commands against a live REAP DGD on
-the a4 fleet.
+the a4 fleet, including the timing table from the 2026-05-29 end-to-end
+verification on a4-us-002-rl9 (2.73 s checkpoint, 2.66 s restore, full
+HBM round-trip).
+
+[`examples/`](examples/) contains the exact fixtures that verification
+used:
+
+- `cuda-tensor-smoke.yaml` — single-GPU PyTorch Pod manifest that
+  `snapshotctl checkpoint` can consume directly.
+- `cuda-tensor-smoke-script.py` — the Python script the Pod runs;
+  allocates a deterministic CUDA tensor, touches the
+  `ready-for-checkpoint` signal file, then loops printing the tensor
+  sum. After restore the iteration counter resumes from where it was
+  and the tensor sum stays equal to `sum(range(4096))` — proves both
+  CPU and HBM state survived the round trip.
 
 [blog]: https://developer.nvidia.com/blog/nvidia-dynamo-snapshot-fast-startup-for-inference-workloads-on-kubernetes/
 [coexistence]: https://github.com/ai-blaise/criu-snapshots/blob/main/docs/upstream-dynamo-snapshot.md
