@@ -1,6 +1,8 @@
 {{- include "snapshot.validateRuntime" . -}}
-{{- $socket := include "snapshot.runtimeSocket" . -}}
-{{- $socketDir := $socket | dir -}}
+{{- $hostSocket := include "snapshot.runtimeSocket" . -}}
+{{- $hostSocketDir := $hostSocket | dir -}}
+{{- $ctrSocket := include "snapshot.runtimeSocketContainer" . -}}
+{{- $ctrSocketDir := $ctrSocket | dir -}}
 {{- $storageDir := include "snapshot.runtimeStorageDir" . -}}
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -100,8 +102,12 @@ spec:
           args:
             - "--runtime"
             - {{ .Values.runtime.type | quote }}
+            # In-container socket path. The host socket is bind-mounted here
+            # below, so non-default host layouts (k3s, RKE2, CRI-O on RHCOS)
+            # still reach a stable in-container path that matches what the
+            # snapshot-agent binary's runtime client dials by default.
             - "--runtime-socket"
-            - {{ $socket | quote }}
+            - {{ $ctrSocket | quote }}
           securityContext:
             privileged: true
           env:
@@ -129,10 +135,12 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
-            # Mount the runtime socket directory. Derived from runtime.socketPath
-            # so overrides stay reachable inside the container.
+            # Mount the runtime socket directory at the conventional
+            # in-container path so the agent dials the same path on every
+            # cluster regardless of where the host puts the socket
+            # (/run/k3s/containerd on k3s, /run/k3s-containerd on RKE2, etc).
             - name: runtime-run
-              mountPath: {{ $socketDir | quote }}
+              mountPath: {{ $ctrSocketDir | quote }}
             # Mount kubelet pods directory for volume discovery
             - name: kubelet-pods
               mountPath: /var/lib/kubelet/pods
@@ -186,12 +194,13 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
         {{- end }}
-        # Runtime socket directory (read-write for checkpoint operations).
-        # Same path inside and on the host so the agent dials runtime.socketPath
-        # verbatim.
+        # Runtime socket directory on the host (read-write for checkpoint
+        # operations). The hostPath is the variable runtime.socketPath dir;
+        # the corresponding volumeMount above rebinds it at the conventional
+        # in-container path.
         - name: runtime-run
           hostPath:
-            path: {{ $socketDir | quote }}
+            path: {{ $hostSocketDir | quote }}
             type: Directory
         # Kubelet pods directory (for volume discovery)
         - name: kubelet-pods

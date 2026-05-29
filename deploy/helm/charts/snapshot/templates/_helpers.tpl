@@ -84,8 +84,10 @@ Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 {{- end }}
 
 {{/*
-Resolve the runtime socket path. Uses .Values.runtime.socketPath when set,
-otherwise falls back to the per-runtime default.
+Resolve the runtime socket path on the host. Uses .Values.runtime.socketPath
+when set, otherwise falls back to the per-runtime default. This is the path
+the chart bind-mounts from the node into the agent container; it is NOT what
+the agent dials inside the container (see snapshot.runtimeSocketContainer).
 */}}
 {{- define "snapshot.runtimeSocket" -}}
 {{- if .Values.runtime.socketPath }}
@@ -98,9 +100,30 @@ otherwise falls back to the per-runtime default.
 {{- end }}
 
 {{/*
+Resolve the conventional in-container socket path for the chosen runtime.
+The agent binary's runtime client falls back to this hard-coded default
+inside the container even when --runtime-socket is set (the flag parser in
+the published snapshot-agent images does not actually re-route the dial),
+so we always mount the host socket dir at the conventional path and pass
+the same path as --runtime-socket. That way non-default host socket layouts
+(k3s puts it at /run/k3s/containerd/containerd.sock; RKE2 at
+/run/k3s-containerd/containerd.sock; CRI-O on RHCOS at /run/crio/crio.sock)
+work without forking the agent image.
+*/}}
+{{- define "snapshot.runtimeSocketContainer" -}}
+{{- if eq .Values.runtime.type "crio" -}}/var/run/crio/crio.sock{{- else -}}/run/containerd/containerd.sock{{- end -}}
+{{- end }}
+
+{{/*
 Host directory holding per-container storage (overlay upperdirs the agent
-reads for rootfs-diff capture, and CRI-O config.json fallback).
+reads for rootfs-diff capture, and CRI-O config.json fallback). Uses
+.Values.runtime.storageDir when set, otherwise falls back to the per-runtime
+default. k3s stores containerd state under /var/lib/rancher/k3s/agent/containerd
+rather than /var/lib/containerd, so single-node k3s and RKE2 clusters need to
+override this.
 */}}
 {{- define "snapshot.runtimeStorageDir" -}}
-{{- if eq .Values.runtime.type "crio" -}}/var/lib/containers{{- else -}}/var/lib/containerd{{- end -}}
+{{- if .Values.runtime.storageDir -}}
+{{- .Values.runtime.storageDir -}}
+{{- else if eq .Values.runtime.type "crio" -}}/var/lib/containers{{- else -}}/var/lib/containerd{{- end -}}
 {{- end }}
