@@ -83,7 +83,7 @@ spec:
     - name: SGLANG_HIGGS_DSA_INLINE_PRODUCER
       value: "1"
     - name: SGLANG_HIGGS_DSA_FUSED_MLA_DECODE
-      value: "1"
+      value: "0"  # bench-dependent: regresses at B<=16/rank
     - name: SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK
       value: "1"
     - name: SGLANG_USE_SGL_NVFP4_FUSED_RMSNORM
