@@ -1,0 +1,197 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek V3.2 REAP NVFP4 TensorRT-LLM smoke profile.
+#
+# This manifest is intentionally aggregated and small-batch. It exists to
+# validate the ai-blaise/TensorRT-LLM op-trt model path on one 8-GPU B200 node:
+# NVFP4 W4A4 weights, NVFP4 IndexCache+HISA from the Hugging Face model card,
+# Gated Attention, and GatedNorm. HIGGS dense KV is not part of this TensorRT-LLM
+# profile.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v32-reap-trtllm-config
+data:
+  agg.yaml: |
+    backend: pytorch
+    trust_remote_code: true
+    tokenizer: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+    custom_tokenizer: deepseek_v32
+    tensor_parallel_size: 8
+    moe_expert_parallel_size: 8
+    pipeline_parallel_size: 1
+    enable_attention_dp: true
+    enable_lm_head_tp_in_adp: true
+    enable_chunked_prefill: true
+    max_batch_size: 1
+    max_num_tokens: 3136
+    max_seq_len: 2304
+    print_iter_log: true
+    stream_interval: 10
+    kv_cache_config:
+      dtype: fp8
+      free_gpu_memory_fraction: 0.8
+      tokens_per_block: 64
+      enable_block_reuse: false
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 1
+    moe_config:
+      backend: CUTEDSL
+      use_low_precision_moe_combine: true
+    nvfp4_gemm_config:
+      allowed_backends:
+        - cutlass
+        - cublaslt
+        - cutedsl
+        - cuda_core
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v32-reap-trtllm
+  labels:
+    app.kubernetes.io/name: deepseek-v32-reap-trtllm
+    app.kubernetes.io/part-of: dynamo-production
+    ai-blaise.io/inference-engine: tensorrt-llm-op-trt
+spec:
+  backendFramework: trtllm
+  envs:
+    - name: HF_HOME
+      value: /models
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: HF_XET_HIGH_PERFORMANCE
+      value: "1"
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: TLLM_LOG_LEVEL
+      value: INFO
+    - name: TRTLLM_SERVER_DISABLE_GC
+      value: "1"
+    - name: TRTLLM_WORKER_DISABLE_GC
+      value: "1"
+    - name: TRTLLM_ENABLE_PDL
+      value: "1"
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --http-port
+            - "8000"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+    TRTLLMWorker:
+      componentType: worker
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"
+      sharedMemory:
+        size: 256Gi
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: deepseek-v32-reap-nextn-graft-model
+            hostPath:
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+              type: Directory
+          - name: op-trt-source
+            hostPath:
+              path: /home/spencergarnets/work/TensorRT-LLM-op-trt
+              type: Directory
+          - name: trtllm-engine-config
+            configMap:
+              name: deepseek-v32-reap-trtllm-config
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              python3 - <<'PY'
+              import importlib.util
+              import shutil
+              from pathlib import Path
+
+              spec = importlib.util.find_spec("tensorrt_llm")
+              if spec is None or spec.origin is None:
+                  raise RuntimeError("installed tensorrt_llm package not found")
+              package_dir = Path(spec.origin).parent
+              source_dir = Path("/workspace/TensorRT-LLM-op-trt/tensorrt_llm")
+              files = (
+                  "_torch/attention_backend/sparse/dsa.py",
+                  "_torch/model_config.py",
+                  "_torch/models/modeling_deepseekv3.py",
+                  "_torch/modules/attention.py",
+                  "llmapi/llm_args.py",
+              )
+              for rel_path in files:
+                  src = source_dir / rel_path
+                  dst = package_dir / rel_path
+                  if not src.exists():
+                      raise FileNotFoundError(src)
+                  dst.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(src, dst)
+              PY
+              exec python3 -m dynamo.trtllm \
+                --model-path /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft \
+                --served-model-name BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft \
+                --tensor-parallel-size 8 \
+                --expert-parallel-size 8 \
+                --enable-attention-dp \
+                --gpus-per-node 8 \
+                --max-batch-size 1 \
+                --max-num-tokens 3136 \
+                --max-seq-len 2304 \
+                --free-gpu-memory-fraction 0.8 \
+                --extra-engine-args /workspace/trtllm-config/agg.yaml
+          volumeMounts:
+            - name: deepseek-v32-reap-nextn-graft-model
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+              readOnly: true
+            - name: op-trt-source
+              mountPath: /workspace/TensorRT-LLM-op-trt
+              readOnly: true
+            - name: trtllm-engine-config
+              mountPath: /workspace/trtllm-config/agg.yaml
+              subPath: agg.yaml
+              readOnly: true
+          startupProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -lc
+                - pgrep -f 'dynamo.trtllm' >/dev/null
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 360
