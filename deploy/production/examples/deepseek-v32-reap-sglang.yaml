@@ -66,6 +66,30 @@ spec:
       value: "0"
     - name: NCCL_ALGO
       value: Ring
+    - name: SGLANG_CRIU_KEEP_POSIX_SEMAPHORES
+      value: "1"
+    - name: SGLANG_NSA_NVFP4_HISA_CAND_SCORE_WMMA
+      value: "1"
+    - name: SGLANG_NSA_NVFP4_HISA_COMPRESSION_RATIO
+      value: "4.0"
+    - name: SGLANG_NSA_NVFP4_HISA_MEAN_POOL_FMA2
+      value: "1"
+    - name: SGLANG_NSA_NVFP4_HISA_MEAN_POOL_PREDECODE
+      value: "1"
+    - name: SGLANG_NSA_NVFP4_HISA_MEAN_POOL_TRANSP
+      value: "1"
+    - name: SGLANG_HIGGS_DSA_TRTLLM_FP8
+      value: "1"
+    - name: SGLANG_HIGGS_DSA_INLINE_PRODUCER
+      value: "1"
+    - name: SGLANG_HIGGS_DSA_FUSED_MLA_DECODE
+      value: "1"
+    - name: SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK
+      value: "1"
+    - name: SGLANG_USE_SGL_NVFP4_FUSED_RMSNORM
+      value: "1"
+    - name: LD_PRELOAD
+      value: /usr/local/lib/libsglang_criu_sem_unlink.so
   services:
     Frontend:
       componentType: frontend
@@ -215,6 +239,20 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
           volumeMounts:
             - name: deepseek-v32-reap-model
               mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
@@ -345,6 +383,20 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
           volumeMounts:
             - name: deepseek-v32-reap-model
               mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
