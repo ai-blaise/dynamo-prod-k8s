@@ -72,6 +72,8 @@ spec:
       envs:
         - name: DYN_LOG
           value: info
+        - name: DYN_TOKENIZER
+          value: fastokens
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       envs:
