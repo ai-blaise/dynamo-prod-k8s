@@ -1,0 +1,131 @@
+# DeepSeek-V3.2 NextN-Graft TensorRT-LLM aggregate deployment for a single
+# 8-GPU B200 node. This manifest intentionally keeps dense MLA KV on FP8 until
+# the op-trt DeepSeek MLA NVFP4 KV/BMM path is implemented; the sparse DSA
+# IndexCache+HISA path remains NVFP4 via indexer_k_dtype: fp4.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v32-nextn-optrt-config
+data:
+  agg.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 8
+    moe_expert_parallel_size: 8
+    enable_attention_dp: true
+    enable_lm_head_tp_in_adp: true
+    max_batch_size: 1
+    max_input_len: 2048
+    max_seq_len: 4096
+    max_num_tokens: 4096
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: false
+    cuda_graph_config: null
+    kv_cache_config:
+      # Dense DeepSeek MLA NVFP4 KV is not supported in op-trt yet; keep the
+      # separate NVFP4 IndexCache+HISA sparse indexer path enabled below.
+      dtype: fp8
+      free_gpu_memory_fraction: 0.75
+    moe_config:
+      backend: CUTEDSL
+      use_low_precision_moe_combine: true
+    nvfp4_gemm_config:
+      allowed_backends: [cutlass, cublaslt, cuda_core]
+    sparse_attention_config:
+      algorithm: dsa
+      indexer_mode: indexcache-hisa
+      index_n_heads: 64
+      index_head_dim: 128
+      index_topk: 1024
+      index_topk_pattern: FSSS
+      indexer_k_dtype: fp4
+      enable_nvfp4_hisa: true
+      hisa_block_size: 128
+      hisa_block_topk: 64
+      hisa_compression_ratio: 4.0
+      hisa_min_seq_len: 65536
+      hisa_execution_mode: optimized
+      use_cute_dsl_topk: true
+      use_cute_dsl_paged_mqa_logits: true
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v32-nextn-optrt
+spec:
+  backendFramework: trtllm
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:20260531
+          imagePullPolicy: Never
+      envs:
+        - name: DYN_LOG
+          value: info
+    TRTLLMWorker:
+      envFromSecret: hf-token-secret
+      envs:
+        - name: OMPI_MCA_pml
+          value: ob1
+        - name: OMPI_MCA_btl
+          value: self,tcp,vader
+        - name: OMPI_MCA_osc
+          value: pt2pt
+        - name: UCX_TLS
+          value: tcp,self,sm
+        - name: NCCL_IB_DISABLE
+          value: "1"
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          gpu: "8"
+          cpu: "64"
+          memory: "512Gi"
+        limits:
+          gpu: "8"
+      extraPodSpec:
+        volumes:
+          - name: nvidia-config
+            configMap:
+              name: deepseek-v32-nextn-optrt-config
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:20260531
+          imagePullPolicy: Never
+          workingDir: /workspace
+          volumeMounts:
+            - name: nvidia-config
+              mountPath: /workspace/optrt-config
+              readOnly: true
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          args:
+            - --model-path
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --served-model-name
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --tensor-parallel-size
+            - "8"
+            - --expert-parallel-size
+            - "8"
+            - --enable-attention-dp
+            - --gpus-per-node
+            - "8"
+            - --max-batch-size
+            - "1"
+            - --max-num-tokens
+            - "4096"
+            - --max-seq-len
+            - "4096"
+            - --free-gpu-memory-fraction
+            - "0.75"
+            - --extra-engine-args
+            - /workspace/optrt-config/agg.yaml
+            - --publish-events-and-metrics

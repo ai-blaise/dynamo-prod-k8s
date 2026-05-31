@@ -65,6 +65,8 @@ spec:
     - { name: NCCL_ALGO,                                     value: Ring }
     # Install the SGLang pre_snapshot / post_resume hooks on worker import.
     - { name: SGLANG_SNAPSHOT_HOOKS,                         value: "1" }
+    - { name: SGLANG_CRIU_KEEP_POSIX_SEMAPHORES,             value: "1" }
+    - { name: LD_PRELOAD,                                    value: /usr/local/lib/libsglang_criu_sem_unlink.so }
   services:
     Frontend:
       componentType: frontend
@@ -135,14 +137,28 @@ spec:
             imagePullPolicy: IfNotPresent
             env:
               - { name: GHCR_REPO,          value: ghcr.io/ai-blaise/dynamo-snapshots }
-              - { name: SNAPSHOT_TAG,       value: deepseek-v32-reap-prefill-current }
+              - { name: SNAPSHOT_TAG_PREFIX, value: deepseek-v32-reap }
+              - { name: DYNAMO_COMPONENT,    value: prefill }
+              - name: POD_CLIQUE_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['grove.io/podclique-pod-index']
               - { name: SNAPSHOT_DIR,       value: /snap }
               - { name: FINGERPRINT_STRICT, value: "1" }
               - { name: ZSTD_THREADS,       value: "0" }
               - { name: PREWARM,            value: "1" }
+              - { name: OCI_PLAIN_HTTP,      value: "0" }
             envFrom:
               - secretRef: { name: ghcr-pull, optional: true }
-            command: ["/usr/local/bin/snapshot-pull"]
+            command: ["/bin/bash", "-lc"]
+            args:
+              - |
+                set -euo pipefail
+                if [[ -z "${SNAPSHOT_TAG:-}" ]]; then
+                  rank="${POD_CLIQUE_INDEX:-0}"
+                  export SNAPSHOT_TAG="${SNAPSHOT_TAG_PREFIX}-${DYNAMO_COMPONENT}-tp${rank}-dp0-pp0"
+                fi
+                exec /usr/local/bin/snapshot-pull
             volumeMounts:
               - { name: snap, mountPath: /snap }
               - { name: opt-criu-snapshots, mountPath: /opt/criu-snapshots, readOnly: true }
@@ -215,8 +231,12 @@ spec:
             - name: POD_UID
               valueFrom: { fieldRef: { fieldPath: metadata.uid } }
           securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            seccompProfile:
+              type: Unconfined
             capabilities:
-              add: [IPC_LOCK, CHECKPOINT_RESTORE, SYS_ADMIN, SYS_PTRACE]
+              add: [IPC_LOCK, CHECKPOINT_RESTORE, SYS_ADMIN, SYS_PTRACE, NET_ADMIN, SYS_RESOURCE, SYS_TIME]
           startupProbe:
             httpGet: { path: /health, port: 9090 }
             periodSeconds: 10
@@ -225,6 +245,20 @@ spec:
             # ceiling, but the probe budget stays generous so the cold-
             # start fallback (snapshot absent on first deploy) still works.
             failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
           volumeMounts:
             - name: deepseek-v32-reap-model
               mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
@@ -265,14 +299,28 @@ spec:
             imagePullPolicy: IfNotPresent
             env:
               - { name: GHCR_REPO,          value: ghcr.io/ai-blaise/dynamo-snapshots }
-              - { name: SNAPSHOT_TAG,       value: deepseek-v32-reap-decode-current }
+              - { name: SNAPSHOT_TAG_PREFIX, value: deepseek-v32-reap }
+              - { name: DYNAMO_COMPONENT,    value: decode }
+              - name: POD_CLIQUE_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['grove.io/podclique-pod-index']
               - { name: SNAPSHOT_DIR,       value: /snap }
               - { name: FINGERPRINT_STRICT, value: "1" }
               - { name: ZSTD_THREADS,       value: "0" }
               - { name: PREWARM,            value: "1" }
+              - { name: OCI_PLAIN_HTTP,      value: "0" }
             envFrom:
               - secretRef: { name: ghcr-pull, optional: true }
-            command: ["/usr/local/bin/snapshot-pull"]
+            command: ["/bin/bash", "-lc"]
+            args:
+              - |
+                set -euo pipefail
+                if [[ -z "${SNAPSHOT_TAG:-}" ]]; then
+                  rank="${POD_CLIQUE_INDEX:-0}"
+                  export SNAPSHOT_TAG="${SNAPSHOT_TAG_PREFIX}-${DYNAMO_COMPONENT}-tp${rank}-dp0-pp0"
+                fi
+                exec /usr/local/bin/snapshot-pull
             volumeMounts:
               - { name: snap, mountPath: /snap }
               - { name: opt-criu-snapshots, mountPath: /opt/criu-snapshots, readOnly: true }
@@ -366,13 +414,31 @@ spec:
             - name: POD_UID
               valueFrom: { fieldRef: { fieldPath: metadata.uid } }
           securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            seccompProfile:
+              type: Unconfined
             capabilities:
-              add: [IPC_LOCK, CHECKPOINT_RESTORE, SYS_ADMIN, SYS_PTRACE]
+              add: [IPC_LOCK, CHECKPOINT_RESTORE, SYS_ADMIN, SYS_PTRACE, NET_ADMIN, SYS_RESOURCE, SYS_TIME]
           startupProbe:
             httpGet: { path: /health, port: 9090 }
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
           volumeMounts:
             - name: deepseek-v32-reap-model
               mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4

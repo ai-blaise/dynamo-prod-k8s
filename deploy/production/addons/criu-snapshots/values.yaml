@@ -36,6 +36,10 @@ daemon:
   kubeletCheckpointsPath: /var/lib/kubelet/checkpoints
   kubeletPkiPath: /var/lib/rancher/k3s/agent
   containerdSocketPath: /run/k3s/containerd/containerd.sock
+  kubeletViaAPIServer: false
+  kubeletInsecureSkipVerify: true
+  criuRuncTimeoutSeconds: 900
+  kubeletTimeoutSeconds: 1800
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 512Mi }
