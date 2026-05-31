@@ -129,6 +129,25 @@ spec:
           image: local/dynamo-trtllm-optrt-custom:20260531
           imagePullPolicy: Never
           workingDir: /workspace
+          startupProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
           volumeMounts:
             - name: nvidia-config
               mountPath: /workspace/optrt-config
