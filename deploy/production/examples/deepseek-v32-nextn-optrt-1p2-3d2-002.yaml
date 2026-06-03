@@ -1,0 +1,399 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# TOPOLOGY 4: DISAGGREGATED 1 prefill (2-GPU) + 3 decode (2-GPU each) on a4-us-002.
+# Retargeted from deploy/production/examples/deepseek-v32-nextn-optrt.yaml to:
+#   - node a4-us-002-rl9 (was a4-us-001)
+#   - image 7piece-v4-20260603 (was 20260602)
+#   - hostPath /models mount (matches the working disagg manifest)
+#   - SMC-SD speculative_config STRIPPED: the draft model
+#     /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP is NOT present on a4-us-002,
+#     and SMC CUDA-graph capture is a known crash (see disagg manifest note). This
+#     measures the pure 1p2+3d2 disagg decode rate, comparable to the other topos.
+# prefill: tp1/cp2/ep2 (world=4? -> NO: tp1*cp2=2 GPUs) attention-DP + LayerSplit CP.
+# decode : tp2/ep2 attention-DP x 3 replicas. KV-router load-balances across 3 decodes.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v32-nextn-optrt-1p2-3d2-002-config
+data:
+  prefill.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 1
+    context_parallel_size: 2
+    moe_expert_parallel_size: 2
+    enable_attention_dp: true
+    enable_lm_head_tp_in_adp: true
+    max_batch_size: 256
+    max_input_len: 131072
+    max_seq_len: 132096
+    max_num_tokens: 8576
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: true
+    cuda_graph_config:
+      enable_padding: true
+      batch_sizes: [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    print_iter_log: false
+    stream_interval: 128
+    num_postprocess_workers: 8
+    kv_cache_config:
+      dtype: nvfp4
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.78
+      tokens_per_block: 64
+    cache_transceiver_config:
+      backend: DEFAULT
+      max_tokens_in_buffer: 65536
+    moe_config:
+      backend: CUTEDSL
+      use_low_precision_moe_combine: true
+    nvfp4_gemm_config:
+      allowed_backends: [cutlass, cublaslt, cutedsl, cuda_core]
+    sparse_attention_config:
+      algorithm: dsa
+      indexer_mode: indexcache-hisa
+      index_n_heads: 64
+      index_head_dim: 128
+      index_topk: 1024
+      index_topk_pattern: FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
+      indexer_k_dtype: fp4
+      enable_nvfp4_hisa: true
+      hisa_block_size: 128
+      hisa_block_topk: 64
+      hisa_compression_ratio: 4.0
+      hisa_min_seq_len: 32768
+      hisa_execution_mode: optimized
+      use_cute_dsl_topk: true
+      use_cute_dsl_paged_mqa_logits: true
+      q_split_threshold: 8192
+      layersplit_enabled: true
+      layersplit_owner_assignment: round_robin
+      layersplit_transfer_backend: nixl
+      layersplit_all_cp_ranks_transfer: true
+  decode.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 2
+    moe_expert_parallel_size: 2
+    enable_attention_dp: true
+    enable_lm_head_tp_in_adp: true
+    max_batch_size: 256
+    max_input_len: 131072
+    max_seq_len: 132096
+    max_num_tokens: 8576
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: false
+    cuda_graph_config:
+      enable_padding: true
+      batch_sizes: [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    print_iter_log: false
+    stream_interval: 128
+    num_postprocess_workers: 8
+    kv_cache_config:
+      dtype: nvfp4
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.82
+      tokens_per_block: 64
+    cache_transceiver_config:
+      backend: DEFAULT
+      max_tokens_in_buffer: 65536
+    moe_config:
+      backend: CUTEDSL
+      use_low_precision_moe_combine: true
+      warp_decode:
+        enabled: true
+        policy: auto
+        max_batch_size: 32
+        allow_parallelism_fallback: true
+    nvfp4_gemm_config:
+      allowed_backends: [cutlass, cublaslt, cutedsl, cuda_core]
+    sparse_attention_config:
+      algorithm: dsa
+      indexer_mode: indexcache-hisa
+      index_n_heads: 64
+      index_head_dim: 128
+      index_topk: 1024
+      index_topk_pattern: FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
+      indexer_k_dtype: fp4
+      enable_nvfp4_hisa: true
+      hisa_block_size: 128
+      hisa_block_topk: 64
+      hisa_compression_ratio: 4.0
+      hisa_min_seq_len: 32768
+      hisa_execution_mode: optimized
+      use_cute_dsl_topk: true
+      use_cute_dsl_paged_mqa_logits: true
+      q_split_threshold: 8192
+      layersplit_enabled: false
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v32-nextn-optrt-1p2-3d2-002
+  labels:
+    app.kubernetes.io/name: deepseek-v32-nextn-optrt-1p2-3d2-002
+    app.kubernetes.io/part-of: dynamo-production
+    ai-blaise.io/inference-engine: op-trt
+spec:
+  backendFramework: trtllm
+  envs:
+    - name: HF_HOME
+      value: /models
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: HF_MODULES_CACHE
+      value: /tmp/hf_modules
+    - name: HF_XET_HIGH_PERFORMANCE
+      value: "1"
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: PYTORCH_ALLOC_CONF
+      value: expandable_segments:True,max_split_size_mb:512
+    - name: DYN_TRTLLM_SERVER_DISABLE_GC
+      value: "1"
+    - name: NCCL_IB_DISABLE
+      value: "1"
+    - name: NCCL_NVLS_ENABLE
+      value: "0"
+    - name: NCCL_P2P_LEVEL
+      value: NVL
+    - name: NCCL_P2P_DISABLE
+      value: "0"
+    - name: NCCL_CUMEM_ENABLE
+      value: "0"
+    - name: NCCL_ALGO
+      value: Ring
+    - name: NCCL_MNNVL_ENABLE
+      value: "0"
+    - name: UCX_CUDA_IPC_ENABLE_MNNVL
+      value: "0"
+    - name: UCX_TLS
+      value: sm,cuda_copy,cuda_ipc,tcp,self
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: models
+            hostPath:
+              path: /models
+              type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:7piece-v4-20260603
+          imagePullPolicy: Never
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --router-mode
+            - kv
+            - --http-port
+            - "8000"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+      envs:
+        - name: DYN_LOG
+          value: info
+        - name: DYN_TOKENIZER
+          value: fastokens
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+          cpu: "32"
+          memory: "256Gi"
+      sharedMemory:
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: nvidia-config
+            configMap:
+              name: deepseek-v32-nextn-optrt-1p2-3d2-002-config
+          - name: models
+            hostPath:
+              path: /models
+              type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:7piece-v4-20260603
+          imagePullPolicy: Never
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          args:
+            - --model-path
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --served-model-name
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --tensor-parallel-size
+            - "1"
+            - --expert-parallel-size
+            - "2"
+            - --enable-attention-dp
+            - --gpus-per-node
+            - "2"
+            - --max-batch-size
+            - "256"
+            - --max-num-tokens
+            - "8576"
+            - --max-seq-len
+            - "132096"
+            - --free-gpu-memory-fraction
+            - "0.78"
+            - --kv-block-size
+            - "64"
+            - --connector
+            - none
+            - --extra-engine-args
+            - /workspace/optrt-config/prefill.yaml
+            - --disaggregation-mode
+            - prefill
+            - --publish-events-and-metrics
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+          startupProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          livenessProbe:
+            httpGet: { path: /live, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          volumeMounts:
+            - name: nvidia-config
+              mountPath: /workspace/optrt-config
+              readOnly: true
+            - name: models
+              mountPath: /models
+              readOnly: true
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 3
+      envFromSecret: hf-token-secret
+      envs:
+        - name: ENABLE_CONFIGURABLE_MOE
+          value: "0"
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+          cpu: "32"
+          memory: "256Gi"
+      sharedMemory:
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: nvidia-config
+            configMap:
+              name: deepseek-v32-nextn-optrt-1p2-3d2-002-config
+          - name: models
+            hostPath:
+              path: /models
+              type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:7piece-v4-20260603
+          imagePullPolicy: Never
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          args:
+            - --model-path
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --served-model-name
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --tensor-parallel-size
+            - "2"
+            - --expert-parallel-size
+            - "2"
+            - --enable-attention-dp
+            - --gpus-per-node
+            - "2"
+            - --max-batch-size
+            - "256"
+            - --max-num-tokens
+            - "8576"
+            - --max-seq-len
+            - "132096"
+            - --free-gpu-memory-fraction
+            - "0.82"
+            - --kv-block-size
+            - "64"
+            - --connector
+            - none
+            - --extra-engine-args
+            - /workspace/optrt-config/decode.yaml
+            - --disaggregation-mode
+            - decode
+            - --publish-events-and-metrics
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+          startupProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          livenessProbe:
+            httpGet: { path: /live, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          volumeMounts:
+            - name: nvidia-config
+              mountPath: /workspace/optrt-config
+              readOnly: true
+            - name: models
+              mountPath: /models
+              readOnly: true

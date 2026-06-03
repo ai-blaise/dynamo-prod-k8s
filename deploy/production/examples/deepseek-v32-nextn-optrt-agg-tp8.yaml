@@ -1,0 +1,241 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# TOPOLOGY 1 (per-user-decode-rate hypothesis): AGGREGATE, NON-disaggregated, one
+# worker spanning all 8 GPUs of a4-us-002. tensor_parallel_size=8 with
+# enable_attention_dp=FALSE -> the MLA latent KV read is TENSOR-PARALLEL sharded
+# across 8 GPUs (8x per-request attention HBM bandwidth) instead of attention-DP
+# (1-GPU bandwidth per request). MoE is ep8. No --disaggregation-mode: the single
+# worker does both prefill and decode. Same engine pieces as the disagg decode
+# (DSA indexcache-hisa/topk1024/fp4/nvfp4_hisa/4:1, WARPDECODE MoE, fp8 KV,
+# dense cuda_graph batch_sizes, KV-router frontend, fastokens, MNNVL-off).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v32-nextn-optrt-agg-tp8-config
+data:
+  worker.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 8
+    moe_expert_parallel_size: 8
+    enable_attention_dp: false
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: false
+    allreduce_strategy: AUTO
+    use_cute_dsl_blockscaling_bmm: true
+    use_cute_dsl_bf16_bmm: true
+    max_batch_size: 64
+    max_input_len: 131072
+    max_seq_len: 132096
+    max_num_tokens: 8192
+    print_iter_log: false
+    stream_interval: 50
+    num_postprocess_workers: 8
+    cuda_graph_config:
+      enable_padding: true
+      batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 32, 48, 64]
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: true
+      free_gpu_memory_fraction: 0.8
+      tokens_per_block: 64
+    cache_transceiver_config:
+      backend: UCX
+      max_tokens_in_buffer: 131072
+    moe_config:
+      backend: WARPDECODE
+      use_low_precision_moe_combine: true
+      warp_decode:
+        enabled: false
+        tile_mode: autotune
+    nvfp4_gemm_config:
+      allowed_backends: [cutlass, cublaslt, cuda_core]
+    sparse_attention_config:
+      algorithm: dsa
+      indexer_mode: indexcache-hisa
+      index_n_heads: 64
+      index_head_dim: 128
+      index_topk: 1024
+      index_topk_pattern: FSSS
+      index_topk_freq: 4
+      indexer_k_dtype: fp4
+      enable_nvfp4_hisa: true
+      hisa_block_size: 128
+      hisa_block_topk: 64
+      hisa_compression_ratio: 4.0
+      hisa_min_seq_len: 65536
+      hisa_execution_mode: optimized
+      use_cute_dsl_topk: true
+      use_cute_dsl_paged_mqa_logits: true
+      layersplit_enabled: false
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v32-nextn-optrt-agg-tp8
+  labels:
+    app.kubernetes.io/name: deepseek-v32-nextn-optrt-agg-tp8
+    app.kubernetes.io/part-of: dynamo-production
+    ai-blaise.io/inference-engine: tensorrt-llm-op-trt
+spec:
+  backendFramework: trtllm
+  envs:
+    - name: HF_HOME
+      value: /models
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: HF_MODULES_CACHE
+      value: /tmp/hf_modules
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: TLLM_LOG_LEVEL
+      value: WARNING
+    - name: TRTLLM_SERVER_DISABLE_GC
+      value: "1"
+    - name: TRTLLM_WORKER_DISABLE_GC
+      value: "1"
+    - name: TRTLLM_ENABLE_PDL
+      value: "1"
+    - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
+      value: "1"
+    - name: NCCL_IB_DISABLE
+      value: "1"
+    - name: NCCL_MNNVL_ENABLE
+      value: "0"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+    - name: NCCL_NVLS_ENABLE
+      value: "0"
+    - name: NCCL_GRAPH_MIXING_SUPPORT
+      value: "0"
+    - name: NVIDIA_GDRCOPY
+      value: "1"
+    - name: UCX_CUDA_IPC_ENABLE_MNNVL
+      value: "0"
+    - name: OMPI_MCA_pml
+      value: ob1
+    - name: OMPI_MCA_btl
+      value: self,tcp,vader
+    - name: UCX_TLS
+      value: tcp,self,sm,cuda_copy,cuda_ipc
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: models
+            hostPath:
+              path: /models
+              type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:7piece-v4-20260603
+          imagePullPolicy: Never
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --http-port
+            - "8000"
+            - --router-mode
+            - kv
+      envs:
+        - name: DYN_LOG
+          value: info
+        - name: DYN_TOKENIZER
+          value: fastokens
+    worker:
+      componentType: worker
+      replicas: 1
+      envFromSecret: hf-token-secret
+      envs:
+        - name: ENABLE_CONFIGURABLE_MOE
+          value: "0"
+      resources:
+        requests:
+          gpu: "8"
+          cpu: "96"
+          memory: "768Gi"
+        limits:
+          gpu: "8"
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: nvidia-config
+            configMap:
+              name: deepseek-v32-nextn-optrt-agg-tp8-config
+          - name: models
+            hostPath:
+              path: /models
+              type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:7piece-v4-20260603
+          imagePullPolicy: Never
+          workingDir: /workspace
+          volumeMounts:
+            - name: nvidia-config
+              mountPath: /workspace/optrt-config
+              readOnly: true
+            - name: models
+              mountPath: /models
+              readOnly: true
+          startupProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          livenessProbe:
+            httpGet: { path: /live, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          args:
+            - --model-path
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --served-model-name
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --tensor-parallel-size
+            - "8"
+            - --expert-parallel-size
+            - "8"
+            - --gpus-per-node
+            - "8"
+            - --max-batch-size
+            - "64"
+            - --max-num-tokens
+            - "8192"
+            - --max-seq-len
+            - "132096"
+            - --free-gpu-memory-fraction
+            - "0.8"
+            - --kv-block-size
+            - "64"
+            - --connector
+            - none
+            - --extra-engine-args
+            - /workspace/optrt-config/worker.yaml
+            - --publish-events-and-metrics

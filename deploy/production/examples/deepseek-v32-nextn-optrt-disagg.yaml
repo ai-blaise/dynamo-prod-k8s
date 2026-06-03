@@ -1,0 +1,472 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek-V3.2 NextN-Graft op-trt DISAGGREGATED deployment, DP=2 on one 8-GPU B200
+# node (a4-us-002): 1 prefill worker on 4 GPUs + 1 decode worker on 4 GPUs.
+# Parallelism = EP (expert-parallel) + attention-DP, NOT tensor-parallel.
+#   - prefill: tp_size 2 x cp_size 2 (world=4) + ep 2 + attention-DP  -> cp2 enables LayerSplit
+#   - decode : tp_size 4 + ep 4 + attention-DP (32 experts/GPU)       -> ~2x per-user decode vs ep2
+# Pieces: #2 DSA indexer (topk1024/NVFP4/IndexCache 4:1/HISA 4:1), #3 LayerSplit (prefill),
+# #4 WarpDecode (decode, autotune), #6 NVFP4 dense MLA KV (guard lifted), KV-router (frontend
+# --router-mode kv), fastokens. #5 SMC-SD is staged OFF here pending the dense-GLM-4-9B-0414
+# fused-gate_up_proj weight-loader fix (the checkpoint pre-fuses gate_up_proj; Glm4WeightLoader
+# splits gate/up).
+# #7 KVBM is DELIBERATELY OFF (--connector none on BOTH workers). It is architecturally
+# incompatible with this disagg+attention-DP topology AND moves zero post-first-token
+# tok/s/user. Full rationale at the prefill --connector flag below; do not flip it on.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v32-nextn-optrt-disagg-config
+data:
+  prefill.yaml: |
+    backend: pytorch
+    # EP not TP, NO CP on the prefill. HELIX cp=2 is incompatible with this disagg setup: it crashes the
+    # MPI worker on prompts < cp*tokens_per_block (128) tokens (partition_context_for_helix ValueError),
+    # and its CP-split KV can't be consumed by the non-CP decode over the disagg handoff (decode hangs in
+    # _serialize_and_exchange_lengths). So prefill = tp4/ep4 attention-DP, matching the decode's KV layout.
+    # CP+LayerSplit on the prefill needs the disagg CP->non-CP KV reconciliation first (deferred deep work).
+    tensor_parallel_size: 4
+    moe_expert_parallel_size: 4
+    enable_attention_dp: true
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: true
+    max_batch_size: 32
+    max_input_len: 131072
+    max_seq_len: 132096
+    max_num_tokens: 8192
+    print_iter_log: false
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 32
+    kv_cache_config:
+      # #6 reverted to fp8 (see decode.yaml note); NVFP4 dense MLA KV needs op-trt cache-layout work.
+      dtype: fp8
+      enable_block_reuse: true
+      free_gpu_memory_fraction: 0.7
+      tokens_per_block: 64
+    cache_transceiver_config:
+      backend: UCX
+      max_tokens_in_buffer: 131072
+    moe_config:
+      backend: TRTLLM
+      use_low_precision_moe_combine: true
+    nvfp4_gemm_config:
+      allowed_backends: [cutlass, cublaslt, cuda_core]
+    sparse_attention_config:
+      algorithm: dsa
+      indexer_mode: indexcache-hisa
+      index_n_heads: 64
+      index_head_dim: 128
+      index_topk: 1024
+      index_topk_pattern: FSSS
+      index_topk_freq: 4          # IndexCache 4:1 (TopK reuse every 4 steps)
+      indexer_k_dtype: fp4
+      enable_nvfp4_hisa: true
+      hisa_block_size: 128
+      hisa_block_topk: 64
+      hisa_compression_ratio: 4.0 # HISA 4:1
+      hisa_min_seq_len: 65536
+      hisa_execution_mode: optimized
+      use_cute_dsl_topk: true
+      use_cute_dsl_paged_mqa_logits: true
+      # #3 LayerSplit OFF pending COMPLETION — op-trt LayerSplit is M5d-partial: multiple unguarded
+      # layer_offsets[layer_idx] accesses for non-owned layers. dsa.py HISA accessor is FIXED, but
+      # trtllm.py:1160 get_local_layer_idx still KeyErrors, and the M5d active-KV broadcast is partial.
+      # Completing the M5d wiring (every accessor + correct non-owned local-idx + active-KV broadcast,
+      # validated for correctness) is the LayerSplit optimization subagent's job; re-enable after it
+      # lands a complete validated fix. Prefill keeps HELIX cp=2 (sequence-parallel) + HISA; only the
+      # per-layer ownership split is off (a .get(idx,0) band-aid would silently corrupt KV addressing).
+      layersplit_enabled: false
+  decode.yaml: |
+    backend: pytorch
+    # EP not TP: tp_size 4 = attention-DP=4 + moe ep=4 (32 experts/GPU). No tensor sharding.
+    tensor_parallel_size: 4
+    moe_expert_parallel_size: 4
+    enable_attention_dp: true
+    # System lever (sweep #1): under attention-DP, imbalanced DP ranks drop CUDA graphs to EAGER (graphs
+    # fire only when all DP ranks are gen-only + equal batch). enable_balance + batching_wait_iters:0 keeps
+    # the 4 ranks aligned so graphs fire — targets the conc32 drop (34 vs conc16's 38).
+    attention_dp_config:
+      enable_balance: true
+      batching_wait_iters: 0
+      timeout_iters: 60
+    trust_remote_code: true
+    allreduce_strategy: AUTO
+    # KERNEL-backend config (direct finding): route the per-step MLA q/v-absorb BMMs to the native
+    # FP8/bf16 cute_dsl Blackwell BMM instead of the default dequant-torch.bmm (else-branch at
+    # attention.py:1162). use_cute_dsl_blockscaling_bmm default False -> we were on the slow path.
+    use_cute_dsl_blockscaling_bmm: true
+    use_cute_dsl_bf16_bmm: true
+    max_batch_size: 64
+    max_input_len: 131072
+    max_seq_len: 132096
+    max_num_tokens: 8192
+    print_iter_log: false
+    stream_interval: 50
+    num_postprocess_workers: 8
+    cuda_graph_config:
+      enable_padding: true
+      # Dense low-end (sweep: fill every int 1-16) so attention-DP per-rank batches (conc/dp:
+      # conc16->4, conc32->8, conc64->16) + imbalanced-rank drift land on an EXACT captured size
+      # instead of padding UP to the next coarse size (eager/wasted compute). Targets the conc32 drop.
+      batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 32, 48, 64]
+    kv_cache_config:
+      # #6 NVFP4 dense MLA KV reverted to fp8: NVFP4 trips "cache size must be divisible by
+      # quant vector size" (MLA latent not 16-aligned) — needs op-trt KV-cache layout work
+      # (rope/latent split + scale alignment). NVFP4 stays on the indexer path (#2).
+      dtype: fp8
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.8
+      tokens_per_block: 64
+    cache_transceiver_config:
+      backend: UCX
+      max_tokens_in_buffer: 131072
+    # #4 WarpDecode (canonical CuteDslFusedMoE; ENABLE_CONFIGURABLE_MOE=0 set on the worker).
+    moe_config:
+      backend: WARPDECODE
+      use_low_precision_moe_combine: true
+      warp_decode:
+        enabled: false
+        tile_mode: autotune
+    nvfp4_gemm_config:
+      allowed_backends: [cutlass, cublaslt, cuda_core]
+    # #5 SMC-SD OFF pending CUDA-graph fix — dense Glm4ForCausalLM + fused gate_up_proj loader work
+    # (modeling_glm.py), but SMC spec-decode CUDA-graph capture crashes: cuda_graph_runner.py:370
+    # _setup_spec_decoding_and_forward reshapes to [B*(gamma+1)=448,1,64,64] while the SMC draft buffer
+    # is sized B*(n_particles*gamma+1)=1600 -> "shape invalid for input of size 6553600". The SMC x
+    # CUDA-graph shape mismatch (gamma+1 vs n_particles*gamma+1) is the SMC-SD subagent's fix; re-enable
+    # after a validated fix. (Disabling cuda_graph_config avoids it but sacrifices the decode-rate win.)
+    # speculative_config:
+    #   decoding_type: SMC
+    #   speculative_model: /models/BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
+    #   gamma: 6
+    #   n_particles: 4
+    #   resample_threshold: 0.5
+    #   draft_attention_backend: triton
+    #   draft_kv_cache_dtype: fp8_e4m3
+    sparse_attention_config:
+      algorithm: dsa
+      indexer_mode: indexcache-hisa
+      index_n_heads: 64
+      index_head_dim: 128
+      index_topk: 1024
+      index_topk_pattern: FSSS
+      index_topk_freq: 4          # IndexCache 4:1
+      indexer_k_dtype: fp4
+      enable_nvfp4_hisa: true
+      hisa_block_size: 128
+      hisa_block_topk: 64
+      hisa_compression_ratio: 4.0 # HISA 4:1
+      hisa_min_seq_len: 65536
+      hisa_execution_mode: optimized
+      use_cute_dsl_topk: true
+      use_cute_dsl_paged_mqa_logits: true
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v32-nextn-optrt-disagg
+  labels:
+    app.kubernetes.io/name: deepseek-v32-nextn-optrt-disagg
+    app.kubernetes.io/part-of: dynamo-production
+    ai-blaise.io/inference-engine: tensorrt-llm-op-trt
+spec:
+  backendFramework: trtllm
+  envs:
+    - name: HF_HOME
+      value: /models
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: HF_MODULES_CACHE
+      value: /tmp/hf_modules
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: TLLM_LOG_LEVEL
+      value: WARNING
+    - name: TRTLLM_SERVER_DISABLE_GC
+      value: "1"
+    - name: TRTLLM_WORKER_DISABLE_GC
+      value: "1"
+    - name: TRTLLM_ENABLE_PDL
+      value: "1"
+    - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
+      value: "1"
+    - name: NCCL_IB_DISABLE
+      value: "1"
+    - name: NCCL_MNNVL_ENABLE
+      value: "0"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+    - name: NCCL_NVLS_ENABLE
+      value: "0"
+    - name: NCCL_GRAPH_MIXING_SUPPORT
+      value: "0"
+    - name: NVIDIA_GDRCOPY
+      value: "1"
+    - name: UCX_CUDA_IPC_ENABLE_MNNVL
+      value: "0"
+    - name: OMPI_MCA_pml
+      value: ob1
+    - name: OMPI_MCA_btl
+      value: self,tcp,vader
+    - name: UCX_TLS
+      value: tcp,self,sm,cuda_copy,cuda_ipc
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: models
+            hostPath:
+              path: /models
+              type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:7piece-v4-20260603
+          imagePullPolicy: Never
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --http-port
+            - "8000"
+            - --router-mode
+            - kv
+      envs:
+        - name: DYN_LOG
+          value: info
+        - name: DYN_TOKENIZER
+          value: fastokens
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        requests:
+          gpu: "4"
+          cpu: "48"
+          memory: "384Gi"
+        limits:
+          gpu: "4"
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: nvidia-config
+            configMap:
+              name: deepseek-v32-nextn-optrt-disagg-config
+          - name: models
+            hostPath:
+              path: /models
+              type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:7piece-v4-20260603
+          imagePullPolicy: Never
+          workingDir: /workspace
+          volumeMounts:
+            - name: nvidia-config
+              mountPath: /workspace/optrt-config
+              readOnly: true
+            - name: models
+              mountPath: /models
+              readOnly: true
+          startupProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          livenessProbe:
+            httpGet: { path: /live, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          args:
+            - --model-path
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --served-model-name
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --disaggregation-mode
+            - prefill
+            - --tensor-parallel-size
+            - "4"
+            - --expert-parallel-size
+            - "4"
+            - --enable-attention-dp
+            - --gpus-per-node
+            - "8"
+            - --max-batch-size
+            - "32"
+            - --max-num-tokens
+            - "8192"
+            - --max-seq-len
+            - "132096"
+            - --free-gpu-memory-fraction
+            - "0.7"
+            - --kv-block-size
+            - "64"
+            # KVBM (#7) STAYS OFF. Three independent, verified reasons:
+            # (1) HARD CRASH under attention-DP. TRT-LLM 1.3.0rc17 hard-guards the KV connector:
+            #     py_executor_creator.py:786 `if mapping.enable_attention_dp: raise
+            #     NotImplementedError("KV connector is not supported with attention data
+            #     parallelism")`. This prefill worker runs --enable-attention-dp, so --connector
+            #     kvbm raises at engine init (empirically reproduced on a4-us-001 with the
+            #     production image, exit 7). Enabling it = a guaranteed startup crash.
+            # (2) The guard is a REAL correctness constraint, not a conservative gate. KvCacheConnectorManager
+            #     (connectors/kv_cache_connector.py:418,447-451) runs the connector scheduler/leader
+            #     on global rank 0 ONLY and mpi_broadcast()s its block metadata to all ranks. Under
+            #     attention-DP each rank is an independent replica holding DIFFERENT requests/blocks,
+            #     so a single rank-0 leader cannot represent ranks 1-3 -> broadcasting rank-0 block
+            #     IDs onto other ranks' sequences would silently corrupt KV. Lifting the guard is
+            #     unsafe. Dropping attention-DP to satisfy it would TP-shard the MLA latent
+            #     (resource_manager.py:1347 tp_size = 1 if enable_attention_dp else tp_size; latent
+            #     head_dim = kv_lora_rank 512 + qk_rope 64 = 576) and break the P/D KV-layout match
+            #     the cache_transceiver requires (kv_cache_transceiver.py:31 passes enable_attention_dp
+            #     into the transfer config) -> decode handoff corruption. No safe topology exists here.
+            # (3) Even if it ran, KVBM moves ZERO post-first-token tok/s/user. It is a PREFILL-side
+            #     prefix cache (host/NVMe offload of finalized/immutable Registered prefix blocks),
+            #     onboarded on a future cache HIT (get_num_new_matched_tokens fires only on new-request
+            #     arrival = prefill). It NEVER offloads active decode KV and explicitly rejects
+            #     generation-only requests (kv_cache_connector.py:453 raises for is_generation_only),
+            #     so it cannot run on the decode worker and cannot enlarge the decode batch. Its only
+            #     benefit is TTFT on repeated prefixes -- and native prefix reuse (enable_block_reuse:
+            #     true in prefill.yaml) already covers that in-HBM. The fgmf=0.7 prefill pool holds
+            #     ~2.4M tokens/GPU (35,136 B/token fp8 MLA latent), so HBM rarely evicts prefixes;
+            #     the KVBM offload tier adds ~nothing and risks churn (kvbm-guide.md:271 requires
+            #     DYN_KVBM_CPU_CACHE_GB >= device KV pool or it degrades).
+            # WHEN KVBM WOULD HELP (give the human a recipe, NOT for this disagg+ADP deploy):
+            #   - Only on a NON-attention-DP worker (pure TP), and only as a TTFT lever, never decode rate.
+            #   - For MLA (DeepSeek) set DYN_KVBM_NCCL_MLA_MODE=true (the image's kvbm IS built with the
+            #     nccl feature: kvbm._core.NcclBootstrap present) so only rank 0 loads from G2/G3 and
+            #     NCCL-broadcasts to the rest; set DYN_KVBM_CPU_CACHE_GB >= the device KV pool GiB;
+            #     enable_partial_reuse is auto-forced False by llm_worker.py:194 for --connector kvbm.
+            #   - The rc1 disagg+KVBM request-hang (commit 18e611da) is already fixed upstream in rc3+;
+            #     this image (rc17) is past it -- so that historical blocker is NOT why KVBM is off here.
+            - --connector
+            - none
+            - --extra-engine-args
+            - /workspace/optrt-config/prefill.yaml
+            - --publish-events-and-metrics
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      envFromSecret: hf-token-secret
+      envs:
+        # WARPDECODE canonical path = CuteDslFusedMoE (not the ConfigurableMoE trtllm_gen overlay).
+        - name: ENABLE_CONFIGURABLE_MOE
+          value: "0"
+      resources:
+        requests:
+          gpu: "4"
+          cpu: "48"
+          memory: "384Gi"
+        limits:
+          gpu: "4"
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-002-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: nvidia-config
+            configMap:
+              name: deepseek-v32-nextn-optrt-disagg-config
+          - name: models
+            hostPath:
+              path: /models
+              type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:7piece-v4-20260603
+          imagePullPolicy: Never
+          workingDir: /workspace
+          volumeMounts:
+            - name: nvidia-config
+              mountPath: /workspace/optrt-config
+              readOnly: true
+            - name: models
+              mountPath: /models
+              readOnly: true
+          startupProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          livenessProbe:
+            httpGet: { path: /live, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          args:
+            - --model-path
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --served-model-name
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            - --disaggregation-mode
+            - decode
+            - --tensor-parallel-size
+            - "4"
+            - --expert-parallel-size
+            - "4"
+            - --enable-attention-dp
+            - --gpus-per-node
+            - "8"
+            - --max-batch-size
+            - "64"
+            - --max-num-tokens
+            - "8192"
+            - --max-seq-len
+            - "132096"
+            - --free-gpu-memory-fraction
+            - "0.8"
+            - --kv-block-size
+            - "64"
+            # KVBM (#7) STAYS OFF here too -- and the decode worker is the WORST place for it:
+            # the connector API rejects generation-only requests outright (kv_cache_connector.py:453
+            # raises RuntimeError for is_generation_only_request), a disagg decode worker NEVER
+            # prefills (it receives prompt KV over the UCX transceiver), and attention-DP would crash
+            # it at init anyway (py_executor_creator.py:786). Decode KV is also not capacity-bound:
+            # at conc32 the live working set (~32 seqs x ~8k ctx ~= 256K tokens) is ~10x under the
+            # fgmf=0.8 pool (~2.9M tokens/GPU @ 35,136 B/token), so neither KVBM nor more KV capacity
+            # can grow the decode batch -- tok/s/user is batch(max_batch_size 64)/bandwidth-bound
+            # (NVIDIA's V3.2 B200 max-throughput reference also runs fgmf 0.8 + attention_dp).
+            # enable_block_reuse stays FALSE in decode.yaml (correct: gen-only has no shared prefix).
+            # See the prefill --connector block above for the full mechanism.
+            - --connector
+            - none
+            - --extra-engine-args
+            - /workspace/optrt-config/decode.yaml
+            - --publish-events-and-metrics

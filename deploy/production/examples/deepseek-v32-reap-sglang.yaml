@@ -57,6 +57,8 @@ spec:
       value: "0"
     - name: NCCL_ALGO
       value: Ring
+    - name: UCX_TLS
+      value: sm,cuda_copy,cuda_ipc,tcp,self
   services:
     Frontend:
       componentType: frontend
@@ -66,6 +68,11 @@ spec:
           kubernetes.io/hostname: a4-us-001-rl9
         tolerations:
           - operator: Exists
+        volumes:
+          - name: deepseek-v32-reap-model
+            hostPath:
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              type: Directory
         mainContainer:
           image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
           imagePullPolicy: IfNotPresent
@@ -87,6 +94,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
+          volumeMounts:
+            - name: deepseek-v32-reap-model
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              readOnly: true
           startupProbe:
             httpGet:
               path: /health
@@ -140,13 +151,15 @@ spec:
             - auto
             - --kv-cache-dtype
             - bfloat16
+            - --json-model-override-args
+            - '{"index_topk":1024}'
             - --tp
             - "4"
             - --dp
             - "4"
             - --enable-dp-attention
             - --mem-fraction-static
-            - "0.80"
+            - "0.55"
             - --max-running-requests
             - "8"
             - --context-length
@@ -155,6 +168,7 @@ spec:
             - "524288"
             - --cuda-graph-max-bs
             - "8"
+            - --disable-cuda-graph
             - --disable-custom-all-reduce
             - --disable-flashinfer-autotune
             - --watchdog-timeout
@@ -245,13 +259,15 @@ spec:
             - auto
             - --kv-cache-dtype
             - bfloat16
+            - --json-model-override-args
+            - '{"index_topk":1024,"dsa_indexer_mode":"indexcache","nsa_indexer_mode":"indexcache","enable_dsa_nvfp4_hisa":false,"enable_nsa_nvfp4_hisa":false}'
             - --tp
             - "4"
             - --dp
             - "4"
             - --enable-dp-attention
             - --mem-fraction-static
-            - "0.80"
+            - "0.55"
             - --max-running-requests
             - "8"
             - --context-length
@@ -260,6 +276,7 @@ spec:
             - "524288"
             - --cuda-graph-max-bs
             - "8"
+            - --disable-cuda-graph
             - --disable-custom-all-reduce
             - --disable-flashinfer-autotune
             - --watchdog-timeout
@@ -273,7 +290,7 @@ spec:
             - flashmla_sparse
             - --enable-hisparse
             - --hisparse-config
-            - '{"top_k":2048,"device_buffer_size":6144,"host_to_device_ratio":10}'
+            - '{"top_k":1024,"device_buffer_size":6144,"host_to_device_ratio":10}'
             - --disaggregation-mode
             - decode
             - --disaggregation-transfer-backend
