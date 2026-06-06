@@ -87,7 +87,11 @@ def render_variant(base: Path, out: Path, transport: str, image: str, mori: bool
         # The Dynamo operator copies the service volume reference by name, so keep
         # the ConfigMap name stable unless the volume references are rewritten too.
         if meta.get("name") and doc.get("kind") != "ConfigMap":
-            meta["name"] = f"{meta['name']}-{suffix}"[:63]
+            if doc.get("kind") == "DynamoGraphDeployment":
+                # Admission requires DGD name + service name <= 45 chars.
+                meta["name"] = f"ds-v32-optrt-{suffix}"[:37]
+            else:
+                meta["name"] = f"{meta['name']}-{suffix}"[:63]
         if doc.get("kind") == "ConfigMap":
             for key in ["prefill.yaml", "decode.yaml"]:
                 cfg = yaml.safe_load(doc["data"][key])

@@ -129,6 +129,29 @@ deploy/production/scripts/run_moriio_openai_matrix.sh
 Required comparison: UCX baseline, UCX with MORI-style pinning, NIXL baseline, NIXL with MORI-style pinning, then Mooncake/native MORI only after their blockers are removed. Do not claim a winner until the 16-user 1k/8k/32k/64k/128k table includes TTFT, ITL/TPOT, tokens/sec/user after first token, failure/abort behavior, and KV transfer metrics.
 
 
+
+## Current multidecode Dependency Probe
+
+The current parent image `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-20260606` has been probed without GPUs. It contains `libtensorrt_llm_ucx_wrapper.so`, `libtensorrt_llm_nixl_wrapper.so`, NIXL Python packages, and `/opt/nvidia/nvda_nixl`, so UCX and NIXL are library-runnable candidates. It does not contain `mori.io`, `mori.cpp.TransferStatus`, `libtensorrt_llm_mori_wrapper.so`, `libtensorrt_llm_mooncake_wrapper.so`, or `libtransfer_engine.so`, so native MORI and Mooncake remain blocked.
+
+The checked-in current-image NIXL manifest is `deploy/production/examples/deepseek-v32-nextn-optrt-multidecode-nixl.yaml`. Validate it with:
+
+```bash
+python3 deploy/production/scripts/validate_moriio_optrt.py \
+  deploy/production/examples/deepseek-v32-nextn-optrt-multidecode-nixl.yaml \
+  --transport NIXL \
+  --image local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-20260606
+```
+
+Probe any candidate image before applying it:
+
+```bash
+deploy/production/scripts/probe_moriio_deps.py \
+  --image local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-20260606 \
+  --image local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-mooncake-20260606 \
+  --image local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-mori-20260606
+```
+
 ## Native MORI Code Ownership Plan
 
 Native MORI is not implemented until the following file-level ownership is complete and validated. The current `_moriio_pin` is deliberately marked `remote_block_metadata_owner=trtllm-cache-transceiver-opaque-state`; native MORI must replace that with explicit MORI transfer ownership rather than rebranding UCX/NIXL.

@@ -6,13 +6,13 @@ set -euo pipefail
 MODE=${MODE:-render}
 ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
 SCRIPT_DIR="$ROOT_DIR/deploy/production/scripts"
-BASE_MANIFEST=${BASE_MANIFEST:-$ROOT_DIR/deploy/production/examples/deepseek-v32-nextn-optrt-hostreq-nixl.yaml}
+BASE_MANIFEST=${BASE_MANIFEST:-$ROOT_DIR/deploy/production/examples/deepseek-v32-nextn-optrt-multidecode-nixl.yaml}
 OUT=${OUT:-/tmp/moriio-transport-ab-$(date +%Y%m%dT%H%M%SZ)}
 NAMESPACE=${NAMESPACE:-moriio-bench}
-PARENT_IMAGE=${PARENT_IMAGE:-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-20260606}
-NIXL_IMAGE=${NIXL_IMAGE:-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-nixl-20260606}
-MOONCAKE_IMAGE=${MOONCAKE_IMAGE:-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-mooncake-20260606}
-NATIVE_MORI_IMAGE=${NATIVE_MORI_IMAGE:-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-mori-20260606}
+PARENT_IMAGE=${PARENT_IMAGE:-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-20260606}
+NIXL_IMAGE=${NIXL_IMAGE:-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-20260606}
+MOONCAKE_IMAGE=${MOONCAKE_IMAGE:-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-mooncake-20260606}
+NATIVE_MORI_IMAGE=${NATIVE_MORI_IMAGE:-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-mori-20260606}
 RUN_BENCH=${RUN_BENCH:-0}
 URL=${URL:-}
 
