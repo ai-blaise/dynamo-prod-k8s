@@ -134,6 +134,12 @@ def validate(path: Path, transport: str = "UCX", expected_image: str = DEFAULT_E
         if transceiver.get("backend_fallback"):
             _die(errors, f"{role} backend_fallback is not allowed; unsupported transports must fail closed")
 
+    prefill_warp = prefill.get("moe_config", {}).get("warp_decode", {})
+    if prefill_warp.get("enabled"):
+        _die(errors, "prefill WarpDecode must remain disabled; WarpDecode is decode-only for r20")
+    if prefill_warp.get("allow_parallelism_fallback") is not None:
+        _die(errors, "prefill must not carry WarpDecode fallback policy fields")
+
     warp = decode.get("moe_config", {}).get("warp_decode", {})
     if not warp.get("enabled") or warp.get("policy") != "force":
         _die(errors, "decode WarpDecode must be enabled with policy=force")

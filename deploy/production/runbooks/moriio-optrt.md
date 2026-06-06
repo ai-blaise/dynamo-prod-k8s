@@ -4,7 +4,7 @@ This runbook documents the CUDA/B200 adaptation of MORI-IO semantics for the cus
 
 ## Parent base requirements
 
-MORI-IO is a follow-on only. Do not promote it until the parent non-MORI image includes op-trt commit `4c62f74` for OpenAI disagg request pinning, `eebb2db` for context-response-authoritative pinning metadata, and `0ae9399` for MPI control RPC fanout, plus the committed LayerSplit CP-shrink/native fixes and the snapshot/checkpoint guard. Do not bypass `TRTLLM_SNAPSHOT_HOOKS` for live CUDA/distributed state. Current full-source parent image is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-20260606` with digest `sha256:6cdb3efe2d317e45dead468103a5854c729e53ff2a31cb9fb3cc5de7ce979f71`. The isolated NIXL derivative for A/B is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606` with digest `sha256:7970f957f8de955f00f1d2bf9687b97ec6c19268de700d41a34bb20011f6dd9f`. The older UCX MORI-style overlay remains `local/dynamo-trtllm-optrt-custom:moriio-ucx-kvarn-k2v2-optrt-cutedsl-overlay-20260606` with digest `sha256:5e7ad82cc34c2075d29505eee56c3f6a45a1eb4feacfc1a66393c92833a7d3f5`, built on `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-cpfix-ucx-mpirpc-kvarn2-ls-mlp-cutedsl-20260605`.
+MORI-IO is a follow-on only. Do not promote it until the parent non-MORI image includes op-trt commit `4c62f74` for OpenAI disagg request pinning, `eebb2db` for context-response-authoritative pinning metadata, and `0ae9399` for MPI control RPC fanout, plus the committed LayerSplit CP-shrink/native fixes and the snapshot/checkpoint guard. Do not bypass `TRTLLM_SNAPSHOT_HOOKS` for live CUDA/distributed state. Current restored full-source parent image is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-20260606` with Docker digest `sha256:ca19596e4be436818511d538b40e99a2a62d1c618810b8f5776a3eee7acfcff6` and k3s imported digest `sha256:ca19596e4be436818511d538b40e99a2a62d1c618810b8f5776a3eee7acfcff6`. The isolated NIXL derivative for A/B is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606` with digest `sha256:17944510ec58a574c909b2016d2463295cb4a5a5d744392a7a520642da2e3b43`, imported into k3s `k8s.io`. The earlier full-source parent image was `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-20260606` with digest `sha256:6cdb3efe2d317e45dead468103a5854c729e53ff2a31cb9fb3cc5de7ce979f71`, and its NIXL derivative was `sha256:7970f957f8de955f00f1d2bf9687b97ec6c19268de700d41a34bb20011f6dd9f`. The older UCX MORI-style overlay remains `local/dynamo-trtllm-optrt-custom:moriio-ucx-kvarn-k2v2-optrt-cutedsl-overlay-20260606` with digest `sha256:5e7ad82cc34c2075d29505eee56c3f6a45a1eb4feacfc1a66393c92833a7d3f5`, built on `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-cpfix-ucx-mpirpc-kvarn2-ls-mlp-cutedsl-20260605`.
 
 ## Contract
 
@@ -74,33 +74,59 @@ For isolated 001 validation:
 6. Check no `HELIX` path is active, LayerSplit is active only on prefill, WarpDecode is forced on decode, and SMC draft traffic is present.
 7. Compare ITL/tok/s/user after first token against the parent baseline before considering TTFT tradeoffs.
 
-## Full-source NIXL Variant
+## Source-grounded Integration Map
 
-Build the full-source derivative without consuming GPUs:
+Direct source audit as of June 6 08:12 UTC:
 
-```bash
-ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z \
-OPTRT_ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z/TensorRT-LLM-fullsrc-nixl-d6e48e3b4 \
-BASE_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-20260606 \
-OUT_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606 \
-BUILD_DIR=/home/spencergarnets/moriio-agent-20260605T1451Z/build/nixl-wrapper-fullsrc-d6e48e3b4 \
-IMAGE_CTX=/home/spencergarnets/moriio-agent-20260605T1451Z/build/moriio-fullsrc-nixl-wrapper-image \
-  deploy/production/scripts/build_moriio_nixl_wrapper_image.sh
+- vLLM native MORI-IO: `vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py` imports `mori.io` and fails availability when absent (lines 74-85). Its scheduler binds `request_id` to `transfer_id`, stores recv/save queues, and maps transfer IDs (lines 270-323). Write mode has decode allocate local blocks, then notify prefill with `transfer_id`, decode block IDs, and remote notify port (lines 426-450). `request_finished` defers producer block free, returns `remote_block_ids`/`remote_engine_id` for read mode, and frees via `finished_sending` or timeout (lines 558-627, 629-650). The toy proxy embeds producer/consumer ZMQ endpoints into `request_id`, creates one `transfer_id`, and dispatches prefill/decode concurrently in write mode (examples/disaggregated/.../moriio_toy_proxy_server.py lines 259-325).
+- vLLM native MORI runtime API: `moriio_engine.py` imports `BackendType`, `EngineDesc`, `IOEngine`, `IOEngineConfig`, `MemoryDesc`, `PollCqMode`, `RdmaBackendConfig`, and `XgmiBackendConfig` from `mori.io` (lines 45-54). The writer queues per-layer `WriteTask`s, waits for decode remote allocation, synchronizes the CUDA event, builds/reuses sessions, and marks failed transfers done to avoid leaks (lines 64-190, 223-260). This is the minimum native API we are missing in the current B200 image.
+- SGLang native MORI: `python/sglang/srt/disaggregation/mori/conn.py` imports `mori.cpp.TransferStatus` and the same `mori.io` primitives (lines 16-26). It tracks rooms/bootstrap addresses, handles multi-rank success/failure, cleans room mappings, sends metadata containing decode KV indices/state, and has explicit sender/receiver abort/clear paths (lines 490-541, 1459-1575). This confirms native MORI cannot run in our image until `mori.io`/`mori.cpp` are installed and CUDA/B200 compatible.
+- SGLang NIXL: `python/sglang/srt/disaggregation/nixl/conn.py` requires `nixl._api`, validates the selected plugin, registers VRAM/DRAM memory, pre-builds transfer descriptor lists, and has heterogeneous TP handling (lines 247-288, 383-390, 516-560, 900-940). This supports NIXL as the closest feasible optimized path on B200 when TRT-LLM wrappers exist.
+- SGLang Mooncake: `python/sglang/srt/disaggregation/mooncake/conn.py` still contains a TODO that NVLink transport is not bug-free for auxiliary sends (lines 829-833), shards transfer queues by destination sessions for early abort behavior (lines 1519-1524), and traces aborts (lines 1710-1713). In this TRT-LLM image it remains blocked by missing `libtensorrt_llm_mooncake_wrapper.so`, plus missing Mooncake Transfer Engine SDK headers/libs for wrapper build.
+- TRT-LLM transport abstraction: `cpp/include/tensorrt_llm/executor/transferAgent.h` defines register/deregister memory, load/invalidate remote agents, submit transfers, notifications, and descriptor checks (lines 371-423). It dynamically loads `libtensorrt_llm_nixl_wrapper.so` or `libtensorrt_llm_mooncake_wrapper.so` by backend name (lines 461-480). `cacheTransceiver.cpp` chooses UCX/NIXL/Mooncake from explicit backend/envs (lines 72-104), constructs NIXL/Mooncake `AgentConnectionManager`s (lines 288-302), sends context KV asynchronously/layer-wise, receives decode KV async/sync, checks completion, and cancels requests through sender/receiver (lines 382-435, 655-827).
+- TRT-LLM NIXL performance guard: `baseTransBuffer.cpp` warns dynamic buffers may fail with NIXL and recommends `cache_transceiver_config.max_tokens_in_buffer` covering maximum ISL (lines 148-158). The r20 validator requires `131072`. `cacheFormatter.cpp` and `mlaCacheFormatter.cpp` explain why non-preallocated cudaMallocAsync buffers require copies for UCX GPU-direct RDMA (lines 87-90 and 322-324), so the A/B must watch transfer bandwidth/copy overhead.
+- Dynamo/op-trt pinning hooks: `components/src/dynamo/trtllm/utils/moriio_pinning.py` creates a JSON-safe pin with `client_request_id`, `disagg_request_id`, `transfer_id`, transfer mode/backend, producer/consumer IDs/topologies, machine ID, and a `remote_block_metadata_owner=trtllm-cache-transceiver-opaque-state` marker (lines 17-142). It rejects literal MORI/MORIIO on B200 without native runtime (lines 60-75), pops the pin before TRT dataclass construction (lines 169-173), validates router worker/machine ID (lines 196-229), and validates mode/backend/schema/handoff (lines 232-260+). `handler_base.py` and `llm_engine.py` attach pins at prefill and validate them at decode before importing KV (handler lines 516-660; engine lines 1017-1088).
+- Deployment guardrails: `validate_moriio_optrt.py` rejects HELIX, enforces TP2xCP2 LayerSplit prefill and TP4xCP1 decode, dense MLA KVarN `kvarn_k2v2` with Indexer not KVarN, forced WarpDecode/no fallback, SMC, explicit transport backend, write/read policy, NIXL/UCX/Mooncake envs, and `UCX_CUDA_IPC_ENABLE_MNNVL=0` (lines 66-210).
+
+Current implementation state: UCX and NIXL are runnable candidates through TRT-LLM cache transceiver plus MORI-style deterministic pinning. This is not native MORI-IO ownership yet because Python/Dynamo does not own remote block IDs, decode preallocation, per-layer writes, or wait/ready; TRT-LLM C++ owns those via opaque disaggregated params and cache transceiver state. Native MORI requires adding a TensorRT-LLM transfer backend or sidecar that exposes `mori.io`-equivalent memory descriptors/sessions/notifications, then extending the pin with native remote block/write metadata instead of `trtllm-cache-transceiver-opaque-state`.
+
+## smcfi NIXL Candidate
+
+Built without GPUs from op-trt `538627d93` and parent image `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-20260606`:
+
+```text
+local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606
+sha256:17944510ec58a574c909b2016d2463295cb4a5a5d744392a7a520642da2e3b43
 ```
 
-Validate the manifest without applying it:
+It is imported into k3s containerd with `k3s ctr -n k8s.io images import`. Validate only, while canary owns GPUs:
 
 ```bash
 python3 deploy/production/scripts/validate_moriio_optrt.py \
-  deploy/production/examples/deepseek-v32-nextn-optrt-fullsrc-nixl.yaml \
+  deploy/production/examples/deepseek-v32-nextn-optrt-smcfi-nixl.yaml \
   --transport NIXL \
-  --image local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606
+  --image local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606
 
 sudo -E /usr/local/bin/k3s kubectl -n dynamo-system apply --dry-run=server \
-  -f deploy/production/examples/deepseek-v32-nextn-optrt-fullsrc-nixl.yaml
+  -f deploy/production/examples/deepseek-v32-nextn-optrt-smcfi-nixl.yaml
 ```
 
-Do not run the real apply while the parent canary owns GPUs. Import to k3s containerd and apply only during an explicit free-GPU window.
+When GPUs are explicitly free, the first real A/B apply command is:
+
+```bash
+sudo -E /usr/local/bin/k3s kubectl -n dynamo-system apply \
+  -f deploy/production/examples/deepseek-v32-nextn-optrt-smcfi-nixl.yaml
+```
+
+Then benchmark with the same workload used for UCX baseline:
+
+```bash
+URL=http://<frontend>:8000 \
+OUT=/tmp/moriio-bench-smcfi-nixl \
+deploy/production/scripts/run_moriio_openai_matrix.sh
+```
+
+Required comparison: UCX baseline, UCX with MORI-style pinning, NIXL baseline, NIXL with MORI-style pinning, then Mooncake/native MORI only after their blockers are removed. Do not claim a winner until the 16-user 1k/4k/16k/32k/64k/128k table includes TTFT, ITL/TPOT, tokens/sec/user after first token, failure/abort behavior, and KV transfer metrics.
 
 ## Failure Policy
 
@@ -142,7 +168,7 @@ OUT=/tmp/moriio-bench-<variant> \
 deploy/production/scripts/run_moriio_openai_matrix.sh
 ```
 
-Required report fields are TTFT, TPOT/ITL, tokens/sec/user after first token, aggregate streamed chunks, abort-trigger result, GPU utilization/memory/power samples, and the logs around `PREFILL: attached MORI-IO pin`, `DECODE: validated MORI-IO pin`, wait/ready, and release/abort cleanup. Do not compare UCX against NIXL/Mooncake until their TensorRT-LLM wrapper libraries are present and the transport render probe marks those variants runnable. NIXL is renderable with `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606` and its checked-in manifest `deploy/production/examples/deepseek-v32-nextn-optrt-fullsrc-nixl.yaml`; Mooncake remains blocked.
+Required report fields are TTFT, TPOT/ITL, tokens/sec/user after first token, aggregate streamed chunks, abort-trigger result, GPU utilization/memory/power samples, and the logs around `PREFILL: attached MORI-IO pin`, `DECODE: validated MORI-IO pin`, wait/ready, and release/abort cleanup. Do not compare UCX against NIXL/Mooncake until their TensorRT-LLM wrapper libraries are present and the transport render probe marks those variants runnable. NIXL is renderable with `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606` and its checked-in manifest `deploy/production/examples/deepseek-v32-nextn-optrt-smcfi-nixl.yaml`; Mooncake remains blocked.
 
 ## Optimization Notes
 
@@ -172,21 +198,25 @@ The manifest pins producer topology with `DYN_TRTLLM_MORIIO_PRODUCER_TOPOLOGY=tp
 
 ## NIXL Wrapper Artifact
 
-The previous blocker `libtensorrt_llm_nixl_wrapper.so` has been removed for the isolated MORI workspace and for the full-source parent A/B derivative. The wrapper was configured and built inside the existing CUDA/TRT-LLM container without `--gpus`, using `/opt/nvidia/nvda_nixl` from the image and the target `tensorrt_llm_nixl_wrapper` only. Reproduce the full-source derivative with:
+The previous blocker `libtensorrt_llm_nixl_wrapper.so` has been removed for the isolated MORI workspace and for the current `smcfi` full-source parent A/B derivative. The wrapper was configured and built inside the existing CUDA/TRT-LLM container without `--gpus`, using `/opt/nvidia/nvda_nixl` from the image and the target `tensorrt_llm_nixl_wrapper` only. Reproduce the current derivative with:
 
 ```bash
 ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z \
-OPTRT_ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z/TensorRT-LLM-fullsrc-nixl-d6e48e3b4 \
-BASE_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-20260606 \
-OUT_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606 \
-BUILD_DIR=/home/spencergarnets/moriio-agent-20260605T1451Z/build/nixl-wrapper-fullsrc-d6e48e3b4 \
-IMAGE_CTX=/home/spencergarnets/moriio-agent-20260605T1451Z/build/moriio-fullsrc-nixl-wrapper-image \
+OPTRT_ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z/TensorRT-LLM-fullsrc-nixl-538627d \
+BASE_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-20260606 \
+OUT_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606 \
+BUILD_DIR=/home/spencergarnets/moriio-agent-20260605T1451Z/build/nixl-wrapper-fullsrc-538627d-smcfi \
+IMAGE_CTX=/home/spencergarnets/moriio-agent-20260605T1451Z/build/moriio-smcfi-nixl-wrapper-image \
   deploy/production/scripts/build_moriio_nixl_wrapper_image.sh
 ```
 
 Produced image:
 
 ```text
+local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606
+sha256:17944510ec58a574c909b2016d2463295cb4a5a5d744392a7a520642da2e3b43
+
+legacy pre-smcfi full-source candidate:
 local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606
 sha256:7970f957f8de955f00f1d2bf9687b97ec6c19268de700d41a34bb20011f6dd9f
 
@@ -195,7 +225,7 @@ local/dynamo-trtllm-optrt-custom:moriio-nixl-kvarn-k2v2-optrt-cutedsl-overlay-20
 sha256:dca8f7e0ffaadb1d646bd7214705013e135a9e814792689e8e1ddcfc09652484
 ```
 
-The transport probe now renders both `UCX` and real TRT-LLM `NIXL` variants for the full-source derivative image. This is not performance proof: it only proves the wrapper and manifest are runnable candidates once GPUs are free. The NIXL C++ agent still honors `TRTLLM_NIXL_KVCACHE_BACKEND`; set it explicitly to `UCX` for the current B200 baseline unless a different NIXL plugin is intentionally tested.
+The transport probe now renders both `UCX` and real TRT-LLM `NIXL` variants for the current `smcfi` derivative image. This is not performance proof: it only proves the wrapper and manifest are runnable candidates once GPUs are free. The NIXL C++ agent still honors `TRTLLM_NIXL_KVCACHE_BACKEND`; set it explicitly to `UCX` for the current B200 baseline unless a different NIXL plugin is intentionally tested.
 
 ## Remaining Wrapper/API Blockers
 
