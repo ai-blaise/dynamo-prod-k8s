@@ -35,6 +35,9 @@ def run(cmd: list[str], check: bool = True, capture: bool = True) -> subprocess.
 
 
 def image_probe(image: str) -> dict[str, Any]:
+    inspect = subprocess.run(["docker", "image", "inspect", image], text=True, capture_output=True)
+    if inspect.returncode != 0:
+        return {"error": f"image missing locally: {image}", "packages": {}, "libs": []}
     script = """
 import importlib.util, json, os
 probes={}
@@ -51,7 +54,11 @@ for root, _, files in os.walk(\"/\"):
                 libs.append(os.path.join(root, f))
 print(json.dumps({\"packages\": probes, \"libs\": sorted(libs)}))
 """
-    cp = run(["docker", "run", "--rm", "--entrypoint", "python3", image, "-c", script])
+    try:
+        cp = run(["docker", "run", "--rm", "--entrypoint", "python3", image, "-c", script])
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()[-1:]
+        return {"error": detail[0] if detail else str(exc), "packages": {}, "libs": []}
     return json.loads(cp.stdout)
 
 
@@ -112,7 +119,7 @@ def actual_backend_and_mode(transport: str) -> tuple[str, bool]:
     if transport.endswith("_BASELINE"):
         return transport[: -len("_BASELINE")], False
     if transport in {"MORI", "NATIVE_MORI"}:
-        return "UCX", False
+        return "MORI", True
     return transport, True
 
 
@@ -140,6 +147,10 @@ def main() -> int:
     for transport in transports:
         actual_transport, mori_semantics = actual_backend_and_mode(transport)
         variant = {"transport": transport, "actual_backend": actual_transport, "mori_semantics": mori_semantics}
+        if probe.get("error"):
+            variant.update(status="blocked", reason=f"image probe failed for {args.image}: {probe['error']}")
+            report["variants"].append(variant)
+            continue
         if transport not in WRAPPER_BY_TRANSPORT:
             variant.update(status="blocked", reason="unknown transport")
             report["variants"].append(variant)

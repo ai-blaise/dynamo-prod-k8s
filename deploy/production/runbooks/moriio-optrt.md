@@ -126,7 +126,70 @@ OUT=/tmp/moriio-bench-hostreq-nixl \
 deploy/production/scripts/run_moriio_openai_matrix.sh
 ```
 
-Required comparison: UCX baseline, UCX with MORI-style pinning, NIXL baseline, NIXL with MORI-style pinning, then Mooncake/native MORI only after their blockers are removed. Do not claim a winner until the 16-user 1k/4k/16k/32k/64k/128k table includes TTFT, ITL/TPOT, tokens/sec/user after first token, failure/abort behavior, and KV transfer metrics.
+Required comparison: UCX baseline, UCX with MORI-style pinning, NIXL baseline, NIXL with MORI-style pinning, then Mooncake/native MORI only after their blockers are removed. Do not claim a winner until the 16-user 1k/8k/32k/64k/128k table includes TTFT, ITL/TPOT, tokens/sec/user after first token, failure/abort behavior, and KV transfer metrics.
+
+
+## Native MORI Code Ownership Plan
+
+Native MORI is not implemented until the following file-level ownership is complete and validated. The current `_moriio_pin` is deliberately marked `remote_block_metadata_owner=trtllm-cache-transceiver-opaque-state`; native MORI must replace that with explicit MORI transfer ownership rather than rebranding UCX/NIXL.
+
+TRT-LLM/op-trt C++ ownership:
+
+- Add a MORI transfer wrapper under `cpp/tensorrt_llm/executor/cache_transmission/mori_utils/` with `CMakeLists.txt`, `transferAgent.cpp`, and any wrapper-local headers. It must expose the same `BaseAgentWrapper` entry points that `transferAgent.h` loads today for NIXL/Mooncake: register/deregister memory, load/invalidate remote agent, submit descriptors, notify, check transfers, and agent metadata.
+- Extend `cpp/include/tensorrt_llm/executor/transferAgent.h` only if the current dynamic loader cannot map a new backend string to `libtensorrt_llm_mori_wrapper.so`. Keep NIXL/Mooncake loading behavior intact.
+- Extend `cpp/tensorrt_llm/batch_manager/cacheTransceiver.cpp` and adjacent config parsing to accept an explicit `MORI` backend, construct the MORI `AgentConnectionManager`, and route send/recv/cancel through the same fail-closed paths used by NIXL/Mooncake. Do not silently fall back to UCX.
+- Preserve LayerSplit CP/TP reassembly in the existing cache formatter paths. MORI must receive the same TP2xCP2 prefill to TP4xCP1 decode block mapping and must not reintroduce HELIX or owner-local assumptions.
+- Add package/build plumbing so `scripts/build_wheel.py` and image packaging include `libtensorrt_llm_mori_wrapper.so` only when the native MORI SDK is present.
+
+Dynamo and OpenAI service ownership:
+
+- Extend `components/src/dynamo/trtllm/utils/moriio_pinning.py` and `tensorrt_llm/serve/moriio_pinning.py` with a `native_mori` payload containing `transfer_id`, `producer_engine_id`, `consumer_engine_id`, handshake endpoint, notify endpoint, remote allocation IDs, block IDs or peer write descriptors, layer/stride metadata, and cleanup generation.
+- Keep the existing authoritative context-response behavior in `tensorrt_llm/serve/openai_disagg_service.py`: `ctx_dp_rank`, `ctx_info_endpoint`, and `encoded_opaque_state` from the real prefill response win; server_info is backfill only.
+- Wire abort/cancel cleanup in `components/src/dynamo/trtllm/request_handlers/handler_base.py` and `components/src/dynamo/trtllm/llm_engine.py` so decode allocation is released and producer-side pending writes are cancelled on success, error, retry, and client abort.
+- Add tests beside `components/src/dynamo/trtllm/tests/test_moriio_pinning.py` and `tests/unittest/disaggregated/test_openai_disagg_service.py` for stale transfer IDs, wrong consumer engine, retry with new transfer generation, abort cleanup, read-mode opt-in, and fail-closed unsupported backend.
+
+Direct source behavior to mirror:
+
+- vLLM `MoRIIOConnector`, `MoRIIOConnectorScheduler`, and `MoRIIOConnectorWorker` in `vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py`: request_id to transfer_id binding, save/recv queues, read-mode `remote_block_ids`/`remote_engine_id`, write-mode decode allocation followed by producer notification, and delayed producer free.
+- vLLM `MoRIIOWriter`, `WriteTask`, `MoRIIOWrapper`, `RemoteAllocInfo`, and `MoRIIOAgentMetadata` in `moriio_engine.py`: `mori.io` IOEngine/session setup, CUDA event synchronization, per-layer write tasks, cached sessions, failure completion marking, and background progress.
+- SGLang `MoriKVManager`, `MoriKVSender`, `MoriKVReceiver`, and bootstrap helpers in `python/sglang/srt/disaggregation/mori/conn.py`: room/bootstrap identity, sender/receiver metadata, multi-rank success/failure accounting, `send_metadata`, `clear`, and `abort`.
+
+Native build dependencies still missing:
+
+- Python/C++ package exports for `mori.io` and `mori.cpp.TransferStatus` with CUDA/B200 support. vLLM and SGLang import these symbols directly; the current hostreq and NIXL images do not contain them.
+- Native runtime symbols equivalent to `BackendType`, `EngineDesc`, `IOEngine`, `IOEngineConfig`, `MemoryDesc`, `MemoryLocationType`, `PollCqMode`, `RdmaBackendConfig`, and `XgmiBackendConfig`.
+- A vendoring plan that installs MORI under an isolated prefix such as `/opt/mori` and packages only `libtensorrt_llm_mori_wrapper.so` plus required runtime libraries into derivative images. UCX and NIXL envs must remain explicit and unaffected.
+
+## Mooncake Build Ownership Plan
+
+TRT-LLM already has Mooncake wrapper source at `cpp/tensorrt_llm/executor/cache_transmission/mooncake_utils/CMakeLists.txt`. It only builds when `MOONCAKE_ROOT` points at an SDK containing `include/transfer_engine_c.h` and `lib/libtransfer_engine.so`; the wrapper links `transfer_engine` and `CUDA::cudart` into `libtensorrt_llm_mooncake_wrapper.so`.
+
+The Mooncake source clone at `/home/spencergarnets/moriio-agent-20260605T1451Z/Mooncake` provides the needed SDK pieces: `mooncake-transfer-engine/include/transfer_engine_c.h`, `mooncake-transfer-engine/include/CMakeLists.txt` install rules, and the `transfer_engine` target in `mooncake-transfer-engine/src/CMakeLists.txt`. It also requires system dependencies including yaml-cpp, JsonCpp, glog, gflags, ibverbs/libnuma, ASIO/yalantinglibs, and CUDA headers. The checked-in build harness is `deploy/production/scripts/build_moriio_mooncake_wrapper_image.sh`; it is non-GPU but may be CPU/package heavy and should be run only in a maintenance window or with a prebuilt SDK:
+
+```bash
+MOONCAKE_ROOT=/path/to/mooncake-sdk \
+BASE_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-20260606 \
+OUT_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-mooncake-20260606 \
+  deploy/production/scripts/build_moriio_mooncake_wrapper_image.sh
+```
+
+Without `MOONCAKE_ROOT`, the script attempts a minimal Transfer Engine build in the base container with `BUILD_SHARED_LIBS=ON`, `WITH_TE=ON`, store/EP/examples/tests disabled, and `USE_CUDA=ON`. If configure fails on missing third-party packages, the exact unblocker is to install Mooncake dependencies or provide a prebuilt SDK; do not mark Mooncake runnable until `libtensorrt_llm_mooncake_wrapper.so` and `libtransfer_engine.so` are both present in the derivative image and `moriio_transport_benchmark.py` renders the `MOONCAKE` variant.
+
+## A/B Matrix Driver
+
+`deploy/production/scripts/run_moriio_transport_ab_matrix.sh` is render-only by default and launches no GPU work. It prepares UCX baseline, UCX+pinning, NIXL baseline, NIXL+pinning, Mooncake, and native MORI variants against the same r20 manifest. It intentionally reports Mooncake/native MORI as blocked when their wrapper/package is absent. After GPUs are explicitly free, use `MODE=apply` for one variant at a time, wait for readiness, then run the OpenAI matrix:
+
+```bash
+OUT=/tmp/moriio-transport-ab \
+MODE=render \
+  deploy/production/scripts/run_moriio_transport_ab_matrix.sh
+
+URL=http://<frontend>:8000 \
+OUT=/tmp/moriio-bench-<variant> \
+  deploy/production/scripts/run_moriio_openai_matrix.sh
+```
+
+The default prompt sweep is `1000 8000 32000 64000 128000` at 16 requests and concurrency 16. Override with `PROMPT_TOKENS`, `REQUESTS`, `CONCURRENCY`, and `MAX_TOKENS` only when comparing every transport with the same values.
 
 ## Failure Policy
 
@@ -145,7 +208,7 @@ FRONTEND_URL=http://<moriio-frontend>:8000
 MODEL=BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
 OUT=/tmp/moriio-bench-cutedsl-ucx
 mkdir -p "$OUT"
-for TOKENS in 1000 4000 16000 32000 64000 128000; do
+for TOKENS in 1000 8000 32000 64000 128000; do
   python3 deploy/production/scripts/moriio_openai_benchmark.py \
     --url "$FRONTEND_URL" \
     --model "$MODEL" \
