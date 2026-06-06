@@ -43,7 +43,69 @@ for root, _, files in os.walk("/"):
                 "transfer_engine", "nixl", "mooncake", "mori",
             ]):
                 libs.append(os.path.join(root, f))
-print(json.dumps({"packages": packages, "attrs": attrs, "libs": sorted(libs)}))
+lifecycle = {}
+# NIXL: construct a CPU-only UCX agent and verify metadata can be produced.
+try:
+    from nixl import _api as nixl_api
+    cfg = nixl_api.nixl_agent_config(
+        enable_prog_thread=False,
+        enable_listen_thread=False,
+        listen_port=0,
+        capture_telemetry=False,
+        num_threads=0,
+        backends=["UCX"],
+    )
+    agent = nixl_api.nixl_agent("probe-agent", cfg, False)
+    metadata = agent.get_agent_metadata()
+    lifecycle["NIXL"] = {
+        "agent_created": True,
+        "agent_metadata_bytes": len(metadata) if hasattr(metadata, "__len__") else None,
+    }
+except Exception as exc:
+    lifecycle["NIXL"] = {"error": repr(exc)}
+
+# Native MORI: mirror vLLM/SGLang's minimal IOEngine lifecycle when available.
+try:
+    from mori.io import BackendType, EngineDesc, IOEngine, IOEngineConfig, PollCqMode, RdmaBackendConfig
+    cfg = IOEngineConfig("127.0.0.1", 0)
+    engine = IOEngine("probe-engine", cfg)
+    desc = engine.get_engine_desc()
+    packed = desc.pack()
+    unpacked = EngineDesc.unpack(packed)
+    mori_lifecycle = {
+        "engine_created": True,
+        "engine_desc_pack_roundtrip": bool(getattr(unpacked, "key", None)),
+        "engine_port": getattr(desc, "port", None),
+    }
+    try:
+        rdma_cfg = RdmaBackendConfig(1, 1, 1, PollCqMode.POLLING, False)
+        engine.create_backend(BackendType.RDMA, rdma_cfg)
+        mori_lifecycle["rdma_backend_created"] = True
+    except Exception as backend_exc:
+        mori_lifecycle["rdma_backend_error"] = repr(backend_exc)
+    lifecycle["NATIVE_MORI"] = mori_lifecycle
+except Exception as exc:
+    lifecycle["NATIVE_MORI"] = {"error": repr(exc)}
+
+# Mooncake: verify Transfer Engine C API symbols when the shared library exists.
+try:
+    import ctypes
+    transfer_lib = next((p for p in libs if p.endswith("libtransfer_engine.so")), None)
+    if transfer_lib:
+        lib = ctypes.CDLL(transfer_lib)
+        required = [
+            "createTransferEngine", "destroyTransferEngine", "registerLocalMemory",
+            "unregisterLocalMemory", "allocateBatchID", "submitTransfer",
+            "getTransferStatus", "freeBatchID",
+        ]
+        missing = [name for name in required if not hasattr(lib, name)]
+        lifecycle["MOONCAKE"] = {"c_api_symbols_present": not missing, "missing_symbols": missing}
+    else:
+        lifecycle["MOONCAKE"] = {"error": "libtransfer_engine.so not found"}
+except Exception as exc:
+    lifecycle["MOONCAKE"] = {"error": repr(exc)}
+
+print(json.dumps({"packages": packages, "attrs": attrs, "libs": sorted(libs), "lifecycle": lifecycle}))
 """
 
 REQUIRED_MORI_IO = {
@@ -61,6 +123,14 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, text=True, capture_output=True)
 
 
+def parse_probe_stdout(stdout: str) -> dict[str, Any]:
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            return json.loads(line)
+    raise ValueError("probe did not emit JSON payload")
+
+
 def probe_image(image: str) -> dict[str, Any]:
     inspect = run(["docker", "image", "inspect", image])
     if inspect.returncode != 0:
@@ -68,7 +138,10 @@ def probe_image(image: str) -> dict[str, Any]:
     cp = run(["docker", "run", "--rm", "--entrypoint", "python3", image, "-c", PACKAGE_SNIPPET])
     if cp.returncode != 0:
         return {"image": image, "status": "probe_failed", "error": (cp.stderr or cp.stdout).strip().splitlines()[-3:]}
-    payload = json.loads(cp.stdout)
+    try:
+        payload = parse_probe_stdout(cp.stdout)
+    except Exception as exc:
+        return {"image": image, "status": "probe_failed", "error": [repr(exc), cp.stdout[-2000:]]}
     return classify({"image": image, "status": "ok", **payload})
 
 
@@ -76,7 +149,10 @@ def probe_host() -> dict[str, Any]:
     cp = run(["python3", "-c", PACKAGE_SNIPPET])
     if cp.returncode != 0:
         return {"host": True, "status": "probe_failed", "error": (cp.stderr or cp.stdout).strip().splitlines()[-3:]}
-    payload = json.loads(cp.stdout)
+    try:
+        payload = parse_probe_stdout(cp.stdout)
+    except Exception as exc:
+        return {"host": True, "status": "probe_failed", "error": [repr(exc), cp.stdout[-2000:]]}
     return classify({"host": True, "status": "ok", **payload})
 
 
@@ -105,23 +181,31 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
     attrs = payload.get("attrs", {})
     mori_attrs = set(attrs.get("mori.io") or []) if isinstance(attrs.get("mori.io"), list) else set()
     cpp_attrs = set(attrs.get("mori.cpp") or []) if isinstance(attrs.get("mori.cpp"), list) else set()
+    lifecycle = payload.get("lifecycle", {})
+    nixl_lifecycle = lifecycle.get("NIXL", {}) if isinstance(lifecycle.get("NIXL"), dict) else {}
+    mori_lifecycle = lifecycle.get("NATIVE_MORI", {}) if isinstance(lifecycle.get("NATIVE_MORI"), dict) else {}
+    mooncake_lifecycle = lifecycle.get("MOONCAKE", {}) if isinstance(lifecycle.get("MOONCAKE"), dict) else {}
     payload["capabilities"] = {
         "ucx_wrapper": has_lib(payload, "libtensorrt_llm_ucx_wrapper.so"),
         "nixl_wrapper": has_lib(payload, "libtensorrt_llm_nixl_wrapper.so"),
         "mooncake_wrapper": has_lib(payload, "libtensorrt_llm_mooncake_wrapper.so"),
         "mori_wrapper": has_lib(payload, "libtensorrt_llm_mori_wrapper.so"),
         "nixl_python": bool(packages.get("nixl") or packages.get("nixl._api")),
+        "nixl_agent_lifecycle": bool(nixl_lifecycle.get("agent_created") and nixl_lifecycle.get("agent_metadata_bytes")),
         "native_mori_python": bool(packages.get("mori.io")),
         "native_mori_cpp_transfer_status": "TransferStatus" in cpp_attrs,
         "native_mori_min_api": REQUIRED_MORI_IO.issubset(mori_attrs),
+        "native_mori_engine_lifecycle": bool(mori_lifecycle.get("engine_created") and mori_lifecycle.get("engine_desc_pack_roundtrip")),
+        "native_mori_rdma_backend_lifecycle": bool(mori_lifecycle.get("rdma_backend_created")),
         "mooncake_transfer_engine": has_lib(payload, "libtransfer_engine.so"),
+        "mooncake_c_api_symbols": bool(mooncake_lifecycle.get("c_api_symbols_present")),
     }
     caps = payload["capabilities"]
     payload["runnable"] = {
         "UCX": caps["ucx_wrapper"],
-        "NIXL": caps["nixl_wrapper"] and caps["nixl_python"],
-        "MOONCAKE": caps["mooncake_wrapper"] and caps["mooncake_transfer_engine"],
-        "NATIVE_MORI": caps["mori_wrapper"] and caps["native_mori_python"] and caps["native_mori_cpp_transfer_status"] and caps["native_mori_min_api"],
+        "NIXL": caps["nixl_wrapper"] and caps["nixl_python"] and caps["nixl_agent_lifecycle"],
+        "MOONCAKE": caps["mooncake_wrapper"] and caps["mooncake_transfer_engine"] and caps["mooncake_c_api_symbols"],
+        "NATIVE_MORI": caps["mori_wrapper"] and caps["native_mori_python"] and caps["native_mori_cpp_transfer_status"] and caps["native_mori_min_api"] and caps["native_mori_engine_lifecycle"] and caps["native_mori_rdma_backend_lifecycle"],
     }
     backend_blockers: dict[str, list[str]] = {"UCX": [], "NIXL": [], "MOONCAKE": [], "NATIVE_MORI": []}
     if not caps["ucx_wrapper"]:
@@ -130,10 +214,14 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         backend_blockers["NIXL"].append("missing libtensorrt_llm_nixl_wrapper.so")
     if not caps["nixl_python"]:
         backend_blockers["NIXL"].append("missing nixl/nixl._api Python package")
+    if not caps["nixl_agent_lifecycle"]:
+        backend_blockers["NIXL"].append("NIXL agent metadata lifecycle failed")
     if not caps["mooncake_wrapper"]:
         backend_blockers["MOONCAKE"].append("missing libtensorrt_llm_mooncake_wrapper.so")
     if not caps["mooncake_transfer_engine"]:
         backend_blockers["MOONCAKE"].append("missing libtransfer_engine.so")
+    if not caps["mooncake_c_api_symbols"]:
+        backend_blockers["MOONCAKE"].append("Mooncake Transfer Engine C API symbol probe failed")
     if not caps["mori_wrapper"]:
         backend_blockers["NATIVE_MORI"].append("missing libtensorrt_llm_mori_wrapper.so")
     if not caps["native_mori_python"]:
@@ -142,6 +230,10 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         backend_blockers["NATIVE_MORI"].append("missing mori.cpp.TransferStatus")
     if not caps["native_mori_min_api"]:
         backend_blockers["NATIVE_MORI"].append("missing mori.io minimum IOEngine/MemoryDesc/RDMA API")
+    if not caps["native_mori_engine_lifecycle"]:
+        backend_blockers["NATIVE_MORI"].append("native MORI IOEngine metadata lifecycle failed")
+    if not caps["native_mori_rdma_backend_lifecycle"]:
+        backend_blockers["NATIVE_MORI"].append("native MORI RDMA backend lifecycle failed")
     payload["backend_blockers"] = {k: v for k, v in backend_blockers.items() if v}
     payload["blockers"] = sorted({item for values in backend_blockers.values() for item in values})
     return payload

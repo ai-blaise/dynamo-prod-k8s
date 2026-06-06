@@ -258,6 +258,52 @@ Unsupported mode/backend combinations must fail closed. Do not set `DYN_TRTLLM_M
 
 Decode must reject a pinned handoff when the router-injected `worker_id` modulo 1024 does not match `_moriio_pin.disagg_machine_id`. This catches stale or cross-replica prefill results before TensorRT-LLM imports KV. Producer and consumer labels are also validated from env so a manifest cannot silently pair a LayerSplit prefill with an incompatible decode deployment.
 
+
+
+## Native Dependency Acquisition Plan
+
+Native MORI cannot be unblocked from the current local sources alone. The local workspace contains vLLM/SGLang MORI integrations, but no CUDA/B200-compatible MORI SDK or package source that exports the required runtime. The smallest actionable dependency bundle is:
+
+- A CUDA/B200-compatible Python package or source tree that imports as `mori.io` and `mori.cpp`.
+- `mori.io` symbols: `BackendType`, `EngineDesc`, `IOEngine`, `IOEngineConfig`, `MemoryDesc`, `PollCqMode`, and `RdmaBackendConfig`.
+- `mori.cpp.TransferStatus`.
+- A native library/API that allows a TensorRT-LLM wrapper `libtensorrt_llm_mori_wrapper.so` to implement the `BaseAgentWrapper` methods in `cpp/include/tensorrt_llm/executor/transferAgent.h`.
+- Lifecycle proof: `IOEngine("probe", IOEngineConfig("127.0.0.1", 0))`, `get_engine_desc().pack()`, `EngineDesc.unpack(...)`, and `create_backend(BackendType.RDMA, RdmaBackendConfig(...))` must all succeed in the candidate image before native MORI can be marked runnable.
+
+After obtaining that SDK, build in an isolated derivative image, not in-place on the canary host:
+
+```bash
+# Pseudocode until MORI_ROOT/package source exists.
+MORI_ROOT=/opt/mori \
+BASE_IMAGE=local/dynamo-trtllm-optrt-custom:<known-good-parent> \
+OUT_IMAGE=local/dynamo-trtllm-optrt-custom:<parent>-mori \
+  deploy/production/scripts/build_moriio_native_wrapper_image.sh
+```
+
+That build script does not exist yet because the required MORI headers/libs/package layout are unknown. Once the SDK exists, it should mirror the NIXL/Mooncake wrapper scripts: configure only the wrapper target, copy `libtensorrt_llm_mori_wrapper.so` and MORI runtime libraries into the derivative image, then run `probe_moriio_deps.py --require NATIVE_MORI` before any Kubernetes apply.
+
+Mooncake has a known source path, but still needs dependency installation or a prebuilt SDK. The smallest Mooncake unblocker is a prefix with `include/transfer_engine_c.h` and `lib/libtransfer_engine.so`; the lifecycle gate then checks required C API symbols (`createTransferEngine`, `destroyTransferEngine`, memory registration, batch allocation, submit/status/free) plus `libtensorrt_llm_mooncake_wrapper.so`.
+
+## UCX vs NIXL First A/B Harness
+
+Use `deploy/production/scripts/run_ucx_nixl_transport_ab.sh` for the first measurable transport comparison. It is render-only by default, probes the selected image with `--require UCX --require NIXL`, renders exactly four variants (`UCX_BASELINE`, `UCX` with pinning, `NIXL_BASELINE`, `NIXL` with pinning), and optionally server-dry-runs the generated manifests. It does not include Mooncake or native MORI because those must pass the promotion gate first.
+
+```bash
+# Non-disruptive prep. SERVER_DRY_RUN=1 contacts the API server but creates nothing.
+IMAGE=local/dynamo-trtllm-optrt-custom:<tag> \
+SERVER_DRY_RUN=1 \
+OUT=/tmp/ucx-nixl-transport-ab \
+  deploy/production/scripts/run_ucx_nixl_transport_ab.sh
+
+# Only after GPUs are explicitly assigned for this sidecar work.
+IMAGE=local/dynamo-trtllm-optrt-custom:<tag> \
+MODE=apply \
+OUT=/tmp/ucx-nixl-transport-ab \
+  deploy/production/scripts/run_ucx_nixl_transport_ab.sh
+```
+
+This harness is still not proof of a winner. It only prepares/adopts resources. The benchmark proof remains the OpenAI matrix at 16 users and `1000 8000 32000 64000 128000`, with request-pinning logs, cleanup/abort logs, LayerSplit/no-HELIX logs, dense MLA KVarN-only config, HISA/DSA, WarpDecode force/no-fallback, and SMC enabled.
+
 ## Long-context Benchmark Matrix
 
 After the isolated namespace is healthy, run the same request count, concurrency, model, output length, and prompt family for every runnable transport. The benchmark script supports deterministic synthetic prompt lengths and `nvidia-smi` sampling so the 1k..128k requirement can be replayed without host tokenizer imports:
