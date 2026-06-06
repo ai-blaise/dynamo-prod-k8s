@@ -4,7 +4,7 @@ This runbook documents the CUDA/B200 adaptation of MORI-IO semantics for the cus
 
 ## Parent base requirements
 
-MORI-IO is a follow-on only. Do not promote it until the parent non-MORI image includes op-trt commit `4c62f74` for OpenAI disagg request pinning, `eebb2db` for context-response-authoritative pinning metadata, and `0ae9399` for MPI control RPC fanout, plus the committed LayerSplit CP-shrink/native fixes and the snapshot/checkpoint guard. Do not bypass `TRTLLM_SNAPSHOT_HOOKS` for live CUDA/distributed state. Current restored full-source parent image is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-20260606` with Docker digest `sha256:ca19596e4be436818511d538b40e99a2a62d1c618810b8f5776a3eee7acfcff6` and k3s imported digest `sha256:ca19596e4be436818511d538b40e99a2a62d1c618810b8f5776a3eee7acfcff6`. The isolated NIXL derivative for A/B is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606` with digest `sha256:17944510ec58a574c909b2016d2463295cb4a5a5d744392a7a520642da2e3b43`, imported into k3s `k8s.io`. The earlier full-source parent image was `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-20260606` with digest `sha256:6cdb3efe2d317e45dead468103a5854c729e53ff2a31cb9fb3cc5de7ce979f71`, and its NIXL derivative was `sha256:7970f957f8de955f00f1d2bf9687b97ec6c19268de700d41a34bb20011f6dd9f`. The older UCX MORI-style overlay remains `local/dynamo-trtllm-optrt-custom:moriio-ucx-kvarn-k2v2-optrt-cutedsl-overlay-20260606` with digest `sha256:5e7ad82cc34c2075d29505eee56c3f6a45a1eb4feacfc1a66393c92833a7d3f5`, built on `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-cpfix-ucx-mpirpc-kvarn2-ls-mlp-cutedsl-20260605`.
+MORI-IO is a follow-on only. Do not promote it until the parent non-MORI image includes op-trt commit `4c62f74` for OpenAI disagg request pinning, `eebb2db` for context-response-authoritative pinning metadata, and `0ae9399` for MPI control RPC fanout, plus the committed LayerSplit CP-shrink/native fixes and the snapshot/checkpoint guard. Do not bypass `TRTLLM_SNAPSHOT_HOOKS` for live CUDA/distributed state. Current restored full-source parent image is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-20260606` with Docker/k3s digest `sha256:9f57cbe58c376fcb515faa3272e91855958e580627305816fa5bc8f8d8afe1f6`. The isolated NIXL derivative for A/B is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-nixl-20260606` with digest `sha256:c3acebccb6454ba3060337c744267bf59357c635d98d744d2b9875a6635b0bc9`, imported into k3s `k8s.io`. The previous smcfi NIXL derivative was `sha256:17944510ec58a574c909b2016d2463295cb4a5a5d744392a7a520642da2e3b43`. The earlier full-source parent image was `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-20260606` with digest `sha256:6cdb3efe2d317e45dead468103a5854c729e53ff2a31cb9fb3cc5de7ce979f71`, and its NIXL derivative was `sha256:7970f957f8de955f00f1d2bf9687b97ec6c19268de700d41a34bb20011f6dd9f`. The older UCX MORI-style overlay remains `local/dynamo-trtllm-optrt-custom:moriio-ucx-kvarn-k2v2-optrt-cutedsl-overlay-20260606` with digest `sha256:5e7ad82cc34c2075d29505eee56c3f6a45a1eb4feacfc1a66393c92833a7d3f5`, built on `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-cpfix-ucx-mpirpc-kvarn2-ls-mlp-cutedsl-20260605`.
 
 ## Contract
 
@@ -90,39 +90,39 @@ Direct source audit as of June 6 08:12 UTC:
 
 Current implementation state: UCX and NIXL are runnable candidates through TRT-LLM cache transceiver plus MORI-style deterministic pinning. This is not native MORI-IO ownership yet because Python/Dynamo does not own remote block IDs, decode preallocation, per-layer writes, or wait/ready; TRT-LLM C++ owns those via opaque disaggregated params and cache transceiver state. Native MORI requires adding a TensorRT-LLM transfer backend or sidecar that exposes `mori.io`-equivalent memory descriptors/sessions/notifications, then extending the pin with native remote block/write metadata instead of `trtllm-cache-transceiver-opaque-state`.
 
-## smcfi NIXL Candidate
+## hostreq NIXL Candidate
 
-Built without GPUs from op-trt `538627d93` and parent image `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-20260606`:
+Built without GPUs from op-trt `538627d93` and parent image `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-20260606`:
 
 ```text
-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606
-sha256:17944510ec58a574c909b2016d2463295cb4a5a5d744392a7a520642da2e3b43
+local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-nixl-20260606
+sha256:c3acebccb6454ba3060337c744267bf59357c635d98d744d2b9875a6635b0bc9
 ```
 
 It is imported into k3s containerd with `k3s ctr -n k8s.io images import`. Validate only, while canary owns GPUs:
 
 ```bash
 python3 deploy/production/scripts/validate_moriio_optrt.py \
-  deploy/production/examples/deepseek-v32-nextn-optrt-smcfi-nixl.yaml \
+  deploy/production/examples/deepseek-v32-nextn-optrt-hostreq-nixl.yaml \
   --transport NIXL \
-  --image local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606
+  --image local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-nixl-20260606
 
 sudo -E /usr/local/bin/k3s kubectl -n dynamo-system apply --dry-run=server \
-  -f deploy/production/examples/deepseek-v32-nextn-optrt-smcfi-nixl.yaml
+  -f deploy/production/examples/deepseek-v32-nextn-optrt-hostreq-nixl.yaml
 ```
 
 When GPUs are explicitly free, the first real A/B apply command is:
 
 ```bash
 sudo -E /usr/local/bin/k3s kubectl -n dynamo-system apply \
-  -f deploy/production/examples/deepseek-v32-nextn-optrt-smcfi-nixl.yaml
+  -f deploy/production/examples/deepseek-v32-nextn-optrt-hostreq-nixl.yaml
 ```
 
 Then benchmark with the same workload used for UCX baseline:
 
 ```bash
 URL=http://<frontend>:8000 \
-OUT=/tmp/moriio-bench-smcfi-nixl \
+OUT=/tmp/moriio-bench-hostreq-nixl \
 deploy/production/scripts/run_moriio_openai_matrix.sh
 ```
 
@@ -168,7 +168,7 @@ OUT=/tmp/moriio-bench-<variant> \
 deploy/production/scripts/run_moriio_openai_matrix.sh
 ```
 
-Required report fields are TTFT, TPOT/ITL, tokens/sec/user after first token, aggregate streamed chunks, abort-trigger result, GPU utilization/memory/power samples, and the logs around `PREFILL: attached MORI-IO pin`, `DECODE: validated MORI-IO pin`, wait/ready, and release/abort cleanup. Do not compare UCX against NIXL/Mooncake until their TensorRT-LLM wrapper libraries are present and the transport render probe marks those variants runnable. NIXL is renderable with `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606` and its checked-in manifest `deploy/production/examples/deepseek-v32-nextn-optrt-smcfi-nixl.yaml`; Mooncake remains blocked.
+Required report fields are TTFT, TPOT/ITL, tokens/sec/user after first token, aggregate streamed chunks, abort-trigger result, GPU utilization/memory/power samples, and the logs around `PREFILL: attached MORI-IO pin`, `DECODE: validated MORI-IO pin`, wait/ready, and release/abort cleanup. Do not compare UCX against NIXL/Mooncake until their TensorRT-LLM wrapper libraries are present and the transport render probe marks those variants runnable. NIXL is renderable with `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-nixl-20260606` and its checked-in manifest `deploy/production/examples/deepseek-v32-nextn-optrt-hostreq-nixl.yaml`; Mooncake remains blocked.
 
 ## Optimization Notes
 
@@ -198,23 +198,23 @@ The manifest pins producer topology with `DYN_TRTLLM_MORIIO_PRODUCER_TOPOLOGY=tp
 
 ## NIXL Wrapper Artifact
 
-The previous blocker `libtensorrt_llm_nixl_wrapper.so` has been removed for the isolated MORI workspace and for the current `smcfi` full-source parent A/B derivative. The wrapper was configured and built inside the existing CUDA/TRT-LLM container without `--gpus`, using `/opt/nvidia/nvda_nixl` from the image and the target `tensorrt_llm_nixl_wrapper` only. Reproduce the current derivative with:
+The previous blocker `libtensorrt_llm_nixl_wrapper.so` has been removed for the isolated MORI workspace and for the current `hostreq` full-source parent A/B derivative. The wrapper was configured and built inside the existing CUDA/TRT-LLM container without `--gpus`, using `/opt/nvidia/nvda_nixl` from the image and the target `tensorrt_llm_nixl_wrapper` only. Reproduce the current derivative with:
 
 ```bash
 ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z \
 OPTRT_ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z/TensorRT-LLM-fullsrc-nixl-538627d \
-BASE_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-20260606 \
-OUT_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606 \
-BUILD_DIR=/home/spencergarnets/moriio-agent-20260605T1451Z/build/nixl-wrapper-fullsrc-538627d-smcfi \
-IMAGE_CTX=/home/spencergarnets/moriio-agent-20260605T1451Z/build/moriio-smcfi-nixl-wrapper-image \
+BASE_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-20260606 \
+OUT_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-nixl-20260606 \
+BUILD_DIR=/home/spencergarnets/moriio-agent-20260605T1451Z/build/nixl-wrapper-fullsrc-538627d-hostreq \
+IMAGE_CTX=/home/spencergarnets/moriio-agent-20260605T1451Z/build/moriio-hostreq-nixl-wrapper-image \
   deploy/production/scripts/build_moriio_nixl_wrapper_image.sh
 ```
 
 Produced image:
 
 ```text
-local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-nixl-20260606
-sha256:17944510ec58a574c909b2016d2463295cb4a5a5d744392a7a520642da2e3b43
+local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-hostreq-nixl-20260606
+sha256:c3acebccb6454ba3060337c744267bf59357c635d98d744d2b9875a6635b0bc9
 
 legacy pre-smcfi full-source candidate:
 local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606
@@ -225,7 +225,7 @@ local/dynamo-trtllm-optrt-custom:moriio-nixl-kvarn-k2v2-optrt-cutedsl-overlay-20
 sha256:dca8f7e0ffaadb1d646bd7214705013e135a9e814792689e8e1ddcfc09652484
 ```
 
-The transport probe now renders both `UCX` and real TRT-LLM `NIXL` variants for the current `smcfi` derivative image. This is not performance proof: it only proves the wrapper and manifest are runnable candidates once GPUs are free. The NIXL C++ agent still honors `TRTLLM_NIXL_KVCACHE_BACKEND`; set it explicitly to `UCX` for the current B200 baseline unless a different NIXL plugin is intentionally tested.
+The transport probe now renders both `UCX` and real TRT-LLM `NIXL` variants for the current `hostreq` derivative image. This is not performance proof: it only proves the wrapper and manifest are runnable candidates once GPUs are free. The NIXL C++ agent still honors `TRTLLM_NIXL_KVCACHE_BACKEND`; set it explicitly to `UCX` for the current B200 baseline unless a different NIXL plugin is intentionally tested.
 
 ## Remaining Wrapper/API Blockers
 
