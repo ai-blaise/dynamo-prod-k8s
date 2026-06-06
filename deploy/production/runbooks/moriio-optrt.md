@@ -4,7 +4,7 @@ This runbook documents the CUDA/B200 adaptation of MORI-IO semantics for the cus
 
 ## Parent base requirements
 
-MORI-IO is a follow-on only. Do not promote it until the parent non-MORI image includes op-trt commit `4c62f74` for OpenAI disagg request pinning, `eebb2db` for context-response-authoritative pinning metadata, and `0ae9399` for MPI control RPC fanout, plus the committed LayerSplit CP-shrink/native fixes and the snapshot/checkpoint guard. Do not bypass `TRTLLM_SNAPSHOT_HOOKS` for live CUDA/distributed state. Current runnable MORI overlay image is `local/dynamo-trtllm-optrt-custom:moriio-ucx-kvarn-k2v2-optrt-cutedsl-overlay-20260606` with digest `sha256:5e7ad82cc34c2075d29505eee56c3f6a45a1eb4feacfc1a66393c92833a7d3f5`, built on `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-cpfix-ucx-mpirpc-kvarn2-ls-mlp-cutedsl-20260605`.
+MORI-IO is a follow-on only. Do not promote it until the parent non-MORI image includes op-trt commit `4c62f74` for OpenAI disagg request pinning, `eebb2db` for context-response-authoritative pinning metadata, and `0ae9399` for MPI control RPC fanout, plus the committed LayerSplit CP-shrink/native fixes and the snapshot/checkpoint guard. Do not bypass `TRTLLM_SNAPSHOT_HOOKS` for live CUDA/distributed state. Current full-source parent image is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-20260606` with digest `sha256:6cdb3efe2d317e45dead468103a5854c729e53ff2a31cb9fb3cc5de7ce979f71`. The isolated NIXL derivative for A/B is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606` with digest `sha256:7970f957f8de955f00f1d2bf9687b97ec6c19268de700d41a34bb20011f6dd9f`. The older UCX MORI-style overlay remains `local/dynamo-trtllm-optrt-custom:moriio-ucx-kvarn-k2v2-optrt-cutedsl-overlay-20260606` with digest `sha256:5e7ad82cc34c2075d29505eee56c3f6a45a1eb4feacfc1a66393c92833a7d3f5`, built on `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-cpfix-ucx-mpirpc-kvarn2-ls-mlp-cutedsl-20260605`.
 
 ## Contract
 
@@ -13,7 +13,7 @@ MORI-IO is a follow-on only. Do not promote it until the parent non-MORI image i
 - The default transfer mode is `write`, represented by `DYN_TRTLLM_MORIIO_TRANSFER_MODE=write`, because it is the MORI-IO mode that overlaps prefill compute and KV transfer.
 - Read mode is allowed only with `DYN_TRTLLM_MORIIO_TRANSFER_MODE=read` and `DYN_TRTLLM_MORIIO_ENABLE_READ_MODE=1`.
 - Request pinning is required with `DYN_TRTLLM_MORIIO_PINNING_REQUIRED=1`; the Dynamo TRT-LLM backend stamps `_moriio_pin` into the actual context response `disaggregated_params` and decode validates it before using the handoff. Actual context response metadata wins for `ctx_dp_rank`, `ctx_info_endpoint`, and opaque transfer state; static `server_info` is backfill only.
-- On the current B200 image, the only runnable TensorRT-LLM cache transceiver wrapper is direct `UCX`: use `DYN_TRTLLM_MORIIO_BACKEND=UCX`, `cache_transceiver_config.backend: UCX`, `TRTLLM_USE_UCX_KVCACHE=1`, and `UCX_CUDA_IPC_ENABLE_MNNVL=0`. Do not claim this is equivalent to real NIXL or Mooncake. Real TRT-LLM NIXL is available only in the separate NIXL wrapper image listed below; real Mooncake requires `libtensorrt_llm_mooncake_wrapper.so`; native MoRI requires `mori.io`. The UCX interim overlay still lacks all non-UCX runtime proof and must fail closed for unavailable transports.
+- The full-source parent image already carries TensorRT-LLM UCX and NIXL wrappers plus `/opt/nvidia/nvda_nixl`; the isolated NIXL derivative rebuilds the NIXL wrapper from the matching full-source tree and bundles NIXL runtime libs under the TensorRT-LLM package path for hermetic A/B. Direct UCX remains the functional baseline: use `DYN_TRTLLM_MORIIO_BACKEND=UCX`, `cache_transceiver_config.backend: UCX`, `TRTLLM_USE_UCX_KVCACHE=1`, and `UCX_CUDA_IPC_ENABLE_MNNVL=0`. NIXL A/B must use `DYN_TRTLLM_MORIIO_BACKEND=NIXL`, `cache_transceiver_config.backend: NIXL`, `TRTLLM_USE_NIXL_KVCACHE=1`, and `TRTLLM_NIXL_KVCACHE_BACKEND=UCX`. Do not claim UCX, NIXL, Mooncake, or native MORI wins without the same workload measured on B200. Mooncake still requires `libtensorrt_llm_mooncake_wrapper.so`; native MoRI requires `mori.io`.
 
 ## Validation
 
@@ -28,8 +28,8 @@ The validator checks LayerSplit/no-HELIX, forced WarpDecode/no fallback, SMC-SD,
 ## Status
 
 Implemented: source-level request pinning hooks in Dynamo TRT-LLM, explicit deployment env/config, and manifest validation.
-Validated: static manifest validation and Python compile/unit-level pinning helper checks.
-Experimental: full write-mode concurrent decode preallocation in TensorRT-LLM C++ equivalent to vLLM MoRIIO `save_kv_layer`; current CUDA path uses TensorRT-LLM disaggregated transceiver semantics over direct UCX because NIXL/Mooncake wrapper libraries are absent in the image.
+Validated: static manifest validation, Python compile/unit-level pinning helper checks, full-source NIXL wrapper image build, transport render probe for NIXL, and Kubernetes server dry-run for the full-source NIXL r20 variant.
+Experimental: full write-mode concurrent decode preallocation in TensorRT-LLM C++ equivalent to vLLM MoRIIO `save_kv_layer`; current CUDA path uses TensorRT-LLM disaggregated transceiver semantics. Real NIXL is now a runnable candidate once GPUs are free, but it has not been E2E or performance validated. Mooncake and native MORI remain blocked by missing runtime/API dependencies.
 
 ## Pin Fields
 
@@ -74,6 +74,34 @@ For isolated 001 validation:
 6. Check no `HELIX` path is active, LayerSplit is active only on prefill, WarpDecode is forced on decode, and SMC draft traffic is present.
 7. Compare ITL/tok/s/user after first token against the parent baseline before considering TTFT tradeoffs.
 
+## Full-source NIXL Variant
+
+Build the full-source derivative without consuming GPUs:
+
+```bash
+ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z \
+OPTRT_ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z/TensorRT-LLM-fullsrc-nixl-d6e48e3b4 \
+BASE_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-20260606 \
+OUT_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606 \
+BUILD_DIR=/home/spencergarnets/moriio-agent-20260605T1451Z/build/nixl-wrapper-fullsrc-d6e48e3b4 \
+IMAGE_CTX=/home/spencergarnets/moriio-agent-20260605T1451Z/build/moriio-fullsrc-nixl-wrapper-image \
+  deploy/production/scripts/build_moriio_nixl_wrapper_image.sh
+```
+
+Validate the manifest without applying it:
+
+```bash
+python3 deploy/production/scripts/validate_moriio_optrt.py \
+  deploy/production/examples/deepseek-v32-nextn-optrt-fullsrc-nixl.yaml \
+  --transport NIXL \
+  --image local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606
+
+sudo -E /usr/local/bin/k3s kubectl -n dynamo-system apply --dry-run=server \
+  -f deploy/production/examples/deepseek-v32-nextn-optrt-fullsrc-nixl.yaml
+```
+
+Do not run the real apply while the parent canary owns GPUs. Import to k3s containerd and apply only during an explicit free-GPU window.
+
 ## Failure Policy
 
 Unsupported mode/backend combinations must fail closed. Do not set `DYN_TRTLLM_MORIIO_BACKEND=NIXL` unless `libtensorrt_llm_nixl_wrapper.so` exists in the image, and do not enable Mooncake unless `libtensorrt_llm_mooncake_wrapper.so` exists and passes the DeepSeek MLA + LayerSplit + SMC benchmark. Do not use `DYN_TRTLLM_MORIIO_BACKEND=moriio` on CUDA/B200 without a real `mori.io` package and CUDA-compatible path.
@@ -114,7 +142,7 @@ OUT=/tmp/moriio-bench-<variant> \
 deploy/production/scripts/run_moriio_openai_matrix.sh
 ```
 
-Required report fields are TTFT, TPOT/ITL, tokens/sec/user after first token, aggregate streamed chunks, abort-trigger result, GPU utilization/memory/power samples, and the logs around `PREFILL: attached MORI-IO pin`, `DECODE: validated MORI-IO pin`, wait/ready, and release/abort cleanup. Do not compare UCX against NIXL/Mooncake until their TensorRT-LLM wrapper libraries are present and the transport render probe marks those variants runnable. NIXL is now renderable only with `local/dynamo-trtllm-optrt-custom:moriio-nixl-kvarn-k2v2-optrt-cutedsl-overlay-20260606`; Mooncake remains blocked.
+Required report fields are TTFT, TPOT/ITL, tokens/sec/user after first token, aggregate streamed chunks, abort-trigger result, GPU utilization/memory/power samples, and the logs around `PREFILL: attached MORI-IO pin`, `DECODE: validated MORI-IO pin`, wait/ready, and release/abort cleanup. Do not compare UCX against NIXL/Mooncake until their TensorRT-LLM wrapper libraries are present and the transport render probe marks those variants runnable. NIXL is renderable with `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606` and its checked-in manifest `deploy/production/examples/deepseek-v32-nextn-optrt-fullsrc-nixl.yaml`; Mooncake remains blocked.
 
 ## Optimization Notes
 
@@ -144,22 +172,31 @@ The manifest pins producer topology with `DYN_TRTLLM_MORIIO_PRODUCER_TOPOLOGY=tp
 
 ## NIXL Wrapper Artifact
 
-The previous blocker `libtensorrt_llm_nixl_wrapper.so` has been removed for the isolated MORI workspace. The wrapper was configured and built inside the existing CUDA/TRT-LLM overlay container without `--gpus`, using `/opt/nvidia/nvda_nixl` from the image and the target `tensorrt_llm_nixl_wrapper` only. Reproduce with:
+The previous blocker `libtensorrt_llm_nixl_wrapper.so` has been removed for the isolated MORI workspace and for the full-source parent A/B derivative. The wrapper was configured and built inside the existing CUDA/TRT-LLM container without `--gpus`, using `/opt/nvidia/nvda_nixl` from the image and the target `tensorrt_llm_nixl_wrapper` only. Reproduce the full-source derivative with:
 
 ```bash
 ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z \
+OPTRT_ROOT=/home/spencergarnets/moriio-agent-20260605T1451Z/TensorRT-LLM-fullsrc-nixl-d6e48e3b4 \
+BASE_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-20260606 \
+OUT_IMAGE=local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606 \
+BUILD_DIR=/home/spencergarnets/moriio-agent-20260605T1451Z/build/nixl-wrapper-fullsrc-d6e48e3b4 \
+IMAGE_CTX=/home/spencergarnets/moriio-agent-20260605T1451Z/build/moriio-fullsrc-nixl-wrapper-image \
   deploy/production/scripts/build_moriio_nixl_wrapper_image.sh
 ```
 
 Produced image:
 
 ```text
+local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-nixl-20260606
+sha256:7970f957f8de955f00f1d2bf9687b97ec6c19268de700d41a34bb20011f6dd9f
+
+legacy overlay candidate:
 local/dynamo-trtllm-optrt-custom:moriio-nixl-kvarn-k2v2-optrt-cutedsl-overlay-20260606
 sha256:dca8f7e0ffaadb1d646bd7214705013e135a9e814792689e8e1ddcfc09652484
 ```
 
-The transport probe now renders both `UCX` and real TRT-LLM `NIXL` variants for that image. This is not performance proof: it only proves the wrapper and manifest are runnable candidates once GPUs are free. The NIXL C++ agent still honors `TRTLLM_NIXL_KVCACHE_BACKEND`; set it explicitly to `UCX` for the current B200 baseline unless a different NIXL plugin is intentionally tested.
+The transport probe now renders both `UCX` and real TRT-LLM `NIXL` variants for the full-source derivative image. This is not performance proof: it only proves the wrapper and manifest are runnable candidates once GPUs are free. The NIXL C++ agent still honors `TRTLLM_NIXL_KVCACHE_BACKEND`; set it explicitly to `UCX` for the current B200 baseline unless a different NIXL plugin is intentionally tested.
 
-## Wrapper Build Blocker
+## Remaining Wrapper/API Blockers
 
-The current image contains `libtensorrt_llm_ucx_wrapper.so` only. TensorRT-LLM source loads NIXL through `libtensorrt_llm_nixl_wrapper.so` and Mooncake through `libtensorrt_llm_mooncake_wrapper.so` from `cpp/include/tensorrt_llm/executor/transferAgent.h`. CMake only creates the NIXL wrapper when `NIXL_ROOT` is set (`cpp/tensorrt_llm/CMakeLists.txt` and `cpp/tensorrt_llm/executor/cache_transmission/nixl_utils/CMakeLists.txt`). Mooncake additionally requires `MOONCAKE_ROOT` plus `transfer_engine` library/header (`cpp/tensorrt_llm/executor/cache_transmission/mooncake_utils/CMakeLists.txt`). `scripts/build_wheel.py` only packages these wrappers if the built `.so` files exist. Removing this blocker requires a TensorRT-LLM C++/wheel rebuild with those roots available, then rerunning the same transport harness.
+NIXL is no longer blocked at wrapper-build time in this workspace: TensorRT-LLM source loads it through `libtensorrt_llm_nixl_wrapper.so` from `cpp/include/tensorrt_llm/executor/transferAgent.h`, and the full-source derivative contains that `.so` plus NIXL runtime libs. It is still unproven until an isolated GPU E2E and 16-user benchmark run complete. Mooncake remains blocked because `libtensorrt_llm_mooncake_wrapper.so` is absent; TensorRT-LLM CMake additionally requires `MOONCAKE_ROOT` plus `transfer_engine` library/header (`cpp/tensorrt_llm/executor/cache_transmission/mooncake_utils/CMakeLists.txt`). Native MORI remains blocked because the image has no CUDA/B200-compatible `mori.io` package/API. `scripts/build_wheel.py` only packages transport wrappers if the built `.so` files exist, so Mooncake removal requires building the Mooncake transfer engine SDK first, then rebuilding the TRT-LLM wrapper and rerunning the same transport harness.

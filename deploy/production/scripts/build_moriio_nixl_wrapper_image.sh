@@ -54,8 +54,8 @@ RUN set -eux; \\
     cp -a /opt/nvidia/nvda_nixl/lib64/*.so* /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/; \\
     if [ -d /opt/nvidia/nvda_nixl/lib64/plugins ]; then cp -a /opt/nvidia/nvda_nixl/lib64/plugins /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/; fi; \\
     if command -v patchelf >/dev/null 2>&1; then \\
-      patchelf --set-rpath '\''\$ORIGIN/nixl:\$ORIGIN/nixl/plugins:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins'\'' /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/libtensorrt_llm_nixl_wrapper.so; \\
-      patchelf --set-rpath '\''\$ORIGIN/nixl:\$ORIGIN/nixl/plugins:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins'\'' /usr/local/lib/libtensorrt_llm_nixl_wrapper.so; \\
+      patchelf --set-rpath '\$ORIGIN/nixl:\$ORIGIN/nixl/plugins:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins' /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/libtensorrt_llm_nixl_wrapper.so; \\
+      patchelf --set-rpath '\$ORIGIN/nixl:\$ORIGIN/nixl/plugins:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins' /usr/local/lib/libtensorrt_llm_nixl_wrapper.so; \\
     fi; \\
     ldconfig || true; \\
     test -f /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/libtensorrt_llm_nixl_wrapper.so; \\
