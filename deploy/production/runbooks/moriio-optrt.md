@@ -225,6 +225,31 @@ OUT=/tmp/moriio-bench-<variant> \
 
 The default prompt sweep is `1000 8000 32000 64000 128000` at 16 requests and concurrency 16. Override with `PROMPT_TOKENS`, `REQUESTS`, `CONCURRENCY`, and `MAX_TOKENS` only when comparing every transport with the same values.
 
+
+## Promotion Gate
+
+Do not promote a backend by label alone. Before applying or benchmarking a new image tag, run the dependency gate with the backend being tested. The command must return zero for a backend to be considered runnable at the dependency level:
+
+```bash
+# UCX/NIXL should pass on current full-source canary images.
+deploy/production/scripts/probe_moriio_deps.py \
+  --image local/dynamo-trtllm-optrt-custom:<tag> \
+  --require UCX \
+  --require NIXL
+
+# Native MORI is expected to fail until mori.io/mori.cpp and the TRT-LLM wrapper exist.
+deploy/production/scripts/probe_moriio_deps.py \
+  --image local/dynamo-trtllm-optrt-custom:<tag> \
+  --require NATIVE_MORI
+
+# Mooncake is expected to fail until libtransfer_engine.so and the TRT-LLM wrapper exist.
+deploy/production/scripts/probe_moriio_deps.py \
+  --image local/dynamo-trtllm-optrt-custom:<tag> \
+  --require MOONCAKE
+```
+
+Passing this dependency gate is still not sufficient for promotion. A promotion candidate must also pass request-pinning, wait/ready, cleanup/abort, LayerSplit + dense MLA KVarN + HISA + WarpDecode + SMC E2E, and the 16-user `1000 8000 32000 64000 128000` benchmark against every runnable baseline.
+
 ## Failure Policy
 
 Unsupported mode/backend combinations must fail closed. Do not set `DYN_TRTLLM_MORIIO_BACKEND=NIXL` unless `libtensorrt_llm_nixl_wrapper.so` exists in the image, and do not enable Mooncake unless `libtensorrt_llm_mooncake_wrapper.so` exists and passes the DeepSeek MLA + LayerSplit + SMC benchmark. Do not use `DYN_TRTLLM_MORIIO_BACKEND=moriio` on CUDA/B200 without a real `mori.io` package and CUDA-compatible path.

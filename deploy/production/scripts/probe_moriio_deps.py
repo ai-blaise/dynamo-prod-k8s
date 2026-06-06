@@ -123,22 +123,27 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         "MOONCAKE": caps["mooncake_wrapper"] and caps["mooncake_transfer_engine"],
         "NATIVE_MORI": caps["mori_wrapper"] and caps["native_mori_python"] and caps["native_mori_cpp_transfer_status"] and caps["native_mori_min_api"],
     }
-    blockers = []
-    if not payload["runnable"]["MOONCAKE"]:
-        if not caps["mooncake_wrapper"]:
-            blockers.append("missing libtensorrt_llm_mooncake_wrapper.so")
-        if not caps["mooncake_transfer_engine"]:
-            blockers.append("missing libtransfer_engine.so")
-    if not payload["runnable"]["NATIVE_MORI"]:
-        if not caps["mori_wrapper"]:
-            blockers.append("missing libtensorrt_llm_mori_wrapper.so")
-        if not caps["native_mori_python"]:
-            blockers.append("missing mori.io package")
-        if not caps["native_mori_cpp_transfer_status"]:
-            blockers.append("missing mori.cpp.TransferStatus")
-        if not caps["native_mori_min_api"]:
-            blockers.append("missing mori.io minimum IOEngine/MemoryDesc/RDMA API")
-    payload["blockers"] = sorted(set(blockers))
+    backend_blockers: dict[str, list[str]] = {"UCX": [], "NIXL": [], "MOONCAKE": [], "NATIVE_MORI": []}
+    if not caps["ucx_wrapper"]:
+        backend_blockers["UCX"].append("missing libtensorrt_llm_ucx_wrapper.so")
+    if not caps["nixl_wrapper"]:
+        backend_blockers["NIXL"].append("missing libtensorrt_llm_nixl_wrapper.so")
+    if not caps["nixl_python"]:
+        backend_blockers["NIXL"].append("missing nixl/nixl._api Python package")
+    if not caps["mooncake_wrapper"]:
+        backend_blockers["MOONCAKE"].append("missing libtensorrt_llm_mooncake_wrapper.so")
+    if not caps["mooncake_transfer_engine"]:
+        backend_blockers["MOONCAKE"].append("missing libtransfer_engine.so")
+    if not caps["mori_wrapper"]:
+        backend_blockers["NATIVE_MORI"].append("missing libtensorrt_llm_mori_wrapper.so")
+    if not caps["native_mori_python"]:
+        backend_blockers["NATIVE_MORI"].append("missing mori.io package")
+    if not caps["native_mori_cpp_transfer_status"]:
+        backend_blockers["NATIVE_MORI"].append("missing mori.cpp.TransferStatus")
+    if not caps["native_mori_min_api"]:
+        backend_blockers["NATIVE_MORI"].append("missing mori.io minimum IOEngine/MemoryDesc/RDMA API")
+    payload["backend_blockers"] = {k: v for k, v in backend_blockers.items() if v}
+    payload["blockers"] = sorted({item for values in backend_blockers.values() for item in values})
     return payload
 
 
@@ -148,6 +153,7 @@ def main() -> int:
     ap.add_argument("--host", action="store_true", help="Probe host Python environment")
     ap.add_argument("--mooncake-root", default=os.environ.get("MOONCAKE_ROOT"))
     ap.add_argument("--out", type=Path)
+    ap.add_argument("--require", action="append", choices=("UCX", "NIXL", "MOONCAKE", "NATIVE_MORI"), default=[], help="Fail if any probed image lacks this runnable backend")
     args = ap.parse_args()
 
     report: dict[str, Any] = {"images": [], "mooncake_root": probe_mooncake_root(args.mooncake_root)}
@@ -155,11 +161,22 @@ def main() -> int:
         report["host"] = probe_host()
     for image in args.image:
         report["images"].append(probe_image(image))
+    failures = []
+    for payload in report["images"]:
+        runnable = payload.get("runnable", {})
+        for backend in args.require:
+            if not runnable.get(backend):
+                reason = "; ".join(payload.get("backend_blockers", {}).get(backend, [])) or payload.get("status", "not runnable")
+                failures.append(f"{payload.get('image')}: {backend} not runnable ({reason})")
+    if failures:
+        report["requirement_failures"] = failures
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(text + "\n")
     print(text)
+    if failures:
+        return 3
     return 0
 
 
