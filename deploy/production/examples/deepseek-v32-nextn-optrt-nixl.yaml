@@ -1,0 +1,390 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v32-nextn-optrt-config
+data:
+  prefill.yaml: "backend: pytorch\ntensor_parallel_size: 2\ncontext_parallel_size:\
+    \ 2\ncp_config:\n  cp_type: LAYERSPLIT\n  tokens_per_block: 64\nmoe_expert_parallel_size:\
+    \ 4\nenable_attention_dp: false\nenable_lm_head_tp_in_adp: true\nmax_batch_size:\
+    \ 32\nmax_input_len: 131072\nmax_seq_len: 132096\nmax_num_tokens: 8192\ntrust_remote_code:\
+    \ true\nenable_chunked_prefill: true\ndisable_overlap_scheduler: true\ncuda_graph_config:\n\
+    \  enable_padding: true\n  batch_sizes:\n  - 1\n  - 2\n  - 4\n  - 8\n  - 16\n\
+    \  - 32\n  - 64\n  - 128\n  - 256\nprint_iter_log: false\nstream_interval: 128\n\
+    num_postprocess_workers: 8\nkv_cache_config:\n  dtype: nvfp4\n  enable_block_reuse:\
+    \ false\n  free_gpu_memory_fraction: 0.6\n  tokens_per_block: 64\ncache_transceiver_config:\n\
+    \  backend: NIXL\n  max_tokens_in_buffer: 131072\nmoe_config:\n  backend: CUTEDSL\n\
+    \  use_low_precision_moe_combine: true\nnvfp4_gemm_config:\n  allowed_backends:\n\
+    \  - cutlass\n  - cublaslt\n  - cutedsl\n  - cuda_core\nsparse_attention_config:\n\
+    \  algorithm: dsa\n  indexer_mode: indexcache-hisa\n  index_n_heads: 64\n  index_head_dim:\
+    \ 128\n  index_topk: 1024\n  index_topk_pattern: FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF\n\
+    \  indexer_k_dtype: fp4\n  mla_latent_kv_dtype: kvarn_k2v2\n  mla_latent_kv_amortize:\
+    \ true\n  enable_nvfp4_hisa: true\n  hisa_block_size: 128\n  hisa_block_topk:\
+    \ 64\n  hisa_compression_ratio: 4.0\n  hisa_min_seq_len: 32768\n  hisa_execution_mode:\
+    \ optimized\n  use_cute_dsl_topk: true\n  use_cute_dsl_paged_mqa_logits: true\n\
+    \  q_split_threshold: 8192\n  layersplit_enabled: true\n  layersplit_owner_assignment:\
+    \ contiguous\n  layersplit_transfer_backend: nixl\n  layersplit_all_cp_ranks_transfer:\
+    \ true\n  layersplit_owner_local_alloc: false\n"
+  decode.yaml: "backend: pytorch\ntensor_parallel_size: 4\ncontext_parallel_size:\
+    \ 1\nmoe_expert_parallel_size: 4\nenable_attention_dp: false\nenable_lm_head_tp_in_adp:\
+    \ true\nmax_batch_size: 64\nmax_input_len: 131072\nmax_seq_len: 132096\nmax_num_tokens:\
+    \ 2048\ntrust_remote_code: true\nenable_chunked_prefill: true\ndisable_overlap_scheduler:\
+    \ false\ncuda_graph_config:\n  enable_padding: true\n  batch_sizes:\n  - 1\n \
+    \ - 2\n  - 4\n  - 8\n  - 16\n  - 32\n  - 64\n  - 128\n  - 256\nprint_iter_log:\
+    \ false\nstream_interval: 128\nnum_postprocess_workers: 8\nkv_cache_config:\n\
+    \  dtype: nvfp4\n  enable_block_reuse: false\n  free_gpu_memory_fraction: 0.68\n\
+    \  tokens_per_block: 64\ncache_transceiver_config:\n  backend: NIXL\n  max_tokens_in_buffer:\
+    \ 131072\nmoe_config:\n  backend: WARPDECODE\n  use_low_precision_moe_combine:\
+    \ true\n  warp_decode:\n    enabled: true\n    policy: force\n    max_batch_size:\
+    \ 64\n    allow_parallelism_fallback: false\nnvfp4_gemm_config:\n  allowed_backends:\n\
+    \  - cutlass\n  - cublaslt\n  - cutedsl\n  - cuda_core\nsparse_attention_config:\n\
+    \  algorithm: dsa\n  indexer_mode: indexcache-hisa\n  index_n_heads: 64\n  index_head_dim:\
+    \ 128\n  index_topk: 1024\n  index_topk_pattern: FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF\n\
+    \  indexer_k_dtype: fp4\n  mla_latent_kv_dtype: kvarn_k2v2\n  mla_latent_kv_amortize:\
+    \ true\n  enable_nvfp4_hisa: true\n  hisa_block_size: 128\n  hisa_block_topk:\
+    \ 64\n  hisa_compression_ratio: 4.0\n  hisa_min_seq_len: 32768\n  hisa_execution_mode:\
+    \ optimized\n  use_cute_dsl_topk: true\n  use_cute_dsl_paged_mqa_logits: true\n\
+    \  q_split_threshold: 8192\n  layersplit_enabled: false\nspeculative_config:\n\
+    \  decoding_type: SMC\n  speculative_model: /models/BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP\n\
+    \  gamma: 6\n  n_particles: 4\n  resample_threshold: 0.5\n  target_temperature:\
+    \ 1.0\n  draft_temperature: 1.0\n  draft_attention_backend: triton\n  draft_kv_cache_dtype:\
+    \ bfloat16\n"
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v32-nextn-optrt-moriio-nixl
+  labels:
+    app.kubernetes.io/name: deepseek-v32-nextn-optrt
+    app.kubernetes.io/part-of: dynamo-production
+    ai-blaise.io/inference-engine: op-trt
+spec:
+  backendFramework: trtllm
+  envs:
+  - name: HF_HOME
+    value: /models
+  - name: HF_HUB_OFFLINE
+    value: '1'
+  - name: HF_XET_HIGH_PERFORMANCE
+    value: '1'
+  - name: PYTHONUNBUFFERED
+    value: '1'
+  - name: PYTORCH_ALLOC_CONF
+    value: expandable_segments:True,max_split_size_mb:512
+  - name: DYN_TRTLLM_SERVER_DISABLE_GC
+    value: '1'
+  - name: TRTLLM_REQUEST_KV_CACHE_CONCURRENT
+    value: '1'
+  - name: TRTLLM_ENABLE_KVCACHE_RECEIVE_PARALLEL
+    value: '1'
+  - name: TRTLLM_KVCACHE_TRANSFER_USE_ASYNC_BUFFER
+    value: '1'
+  - name: TRTLLM_KVCACHE_TRANSFER_BUFFER_SIZE
+    value: 1GB
+  - name: TRTLLM_KVCACHE_SEND_MAX_CONCURRENCY_NUM
+    value: '4'
+  - name: TRTLLM_KVCACHE_RECV_BUFFER_COUNT
+    value: '4'
+  - name: TRTLLM_NIXL_ENABLE_COALESCE
+    value: '1'
+  - name: DYN_TRTLLM_MORIIO_PRODUCER_ID
+    value: optrt-prefill-layersplit
+  - name: DYN_TRTLLM_MORIIO_CONSUMER_ID
+    value: optrt-decode-warpdecode-smc
+  - name: DYN_TRTLLM_MORIIO_PRODUCER_TOPOLOGY
+    value: tp2-cp2-pp1-layersplit-full-layer
+  - name: DYN_TRTLLM_MORIIO_CONSUMER_TOPOLOGY
+    value: tp4-cp1-pp1-warpdecode-smc
+  - name: TRTLLM_WARP_DECODE_FIXED_TACTIC
+    value: '1'
+  - name: TRTLLM_ENABLE_PDL
+    value: '1'
+  - name: NCCL_IB_DISABLE
+    value: '1'
+  - name: NCCL_NVLS_ENABLE
+    value: '0'
+  - name: NCCL_P2P_LEVEL
+    value: NVL
+  - name: NCCL_P2P_DISABLE
+    value: '0'
+  - name: NCCL_CUMEM_ENABLE
+    value: '0'
+  - name: NCCL_ALGO
+    value: Ring
+  - name: UCX_TLS
+    value: sm,cuda_copy,cuda_ipc,tcp,self
+  - name: DYN_TRTLLM_MORIIO_PINNING_REQUIRED
+    value: '1'
+  - name: DYN_TRTLLM_MORIIO_TRANSFER_MODE
+    value: write
+  - name: DYN_TRTLLM_MORIIO_BACKEND
+    value: NIXL
+  - name: TRTLLM_USE_NIXL_KVCACHE
+    value: '1'
+  - name: TRTLLM_NIXL_KVCACHE_BACKEND
+    value: UCX
+  - name: UCX_CUDA_IPC_ENABLE_MNNVL
+    value: '0'
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-001-rl9
+        tolerations:
+        - operator: Exists
+        volumes:
+        - name: deepseek-v32-nextn-model
+          hostPath:
+            path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:moriio-nixl-kvarn-k2v2-optrt-cutedsl-overlay-20260606
+          imagePullPolicy: Never
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --router-mode
+          - kv
+          - --router-kv-events
+          - --router-reset-states
+          - --router-track-active-blocks
+          - --router-track-prefill-tokens
+          - --dyn-chat-processor
+          - dynamo
+          - --tokenizer
+          - fastokens
+          - --trust-remote-code
+          - --model-path
+          - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --model-name
+          - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --kv-cache-block-size
+          - '64'
+          - --http-port
+          - '8000'
+          env:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          volumeMounts:
+          - name: deepseek-v32-nextn-model
+            mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        limits:
+          gpu: '2'
+        requests:
+          gpu: '2'
+          cpu: '32'
+          memory: 256Gi
+      sharedMemory:
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-001-rl9
+        tolerations:
+        - operator: Exists
+        volumes:
+        - name: nvidia-config
+          configMap:
+            name: deepseek-v32-nextn-optrt-config
+        - name: deepseek-v32-nextn-model
+          hostPath:
+            path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:moriio-nixl-kvarn-k2v2-optrt-cutedsl-overlay-20260606
+          imagePullPolicy: Never
+          workingDir: /workspace
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --model-path
+          - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --served-model-name
+          - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --tensor-parallel-size
+          - '1'
+          - --expert-parallel-size
+          - '2'
+          - --enable-attention-dp
+          - --gpus-per-node
+          - '2'
+          - --max-batch-size
+          - '256'
+          - --max-num-tokens
+          - '8576'
+          - --max-seq-len
+          - '132096'
+          - --free-gpu-memory-fraction
+          - '0.60'
+          - --kv-block-size
+          - '64'
+          - --extra-engine-args
+          - /workspace/optrt-config/prefill.yaml
+          - --disaggregation-mode
+          - prefill
+          - --publish-events-and-metrics
+          env:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          volumeMounts:
+          - name: nvidia-config
+            mountPath: /workspace/optrt-config
+            readOnly: true
+          - name: deepseek-v32-nextn-model
+            mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            readOnly: true
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 3
+      envFromSecret: hf-token-secret
+      resources:
+        limits:
+          gpu: '2'
+        requests:
+          gpu: '2'
+          cpu: '32'
+          memory: 256Gi
+      sharedMemory:
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-001-rl9
+        tolerations:
+        - operator: Exists
+        volumes:
+        - name: nvidia-config
+          configMap:
+            name: deepseek-v32-nextn-optrt-config
+        - name: deepseek-v32-nextn-model
+          hostPath:
+            path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            type: Directory
+        - name: smcsd-draft-model
+          hostPath:
+            path: /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
+            type: Directory
+        mainContainer:
+          image: local/dynamo-trtllm-optrt-custom:moriio-nixl-kvarn-k2v2-optrt-cutedsl-overlay-20260606
+          imagePullPolicy: Never
+          workingDir: /workspace
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --model-path
+          - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --served-model-name
+          - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --tensor-parallel-size
+          - '2'
+          - --expert-parallel-size
+          - '2'
+          - --enable-attention-dp
+          - --gpus-per-node
+          - '2'
+          - --max-batch-size
+          - '256'
+          - --max-num-tokens
+          - '8576'
+          - --max-seq-len
+          - '132096'
+          - --free-gpu-memory-fraction
+          - '0.68'
+          - --kv-block-size
+          - '64'
+          - --extra-engine-args
+          - /workspace/optrt-config/decode.yaml
+          - --disaggregation-mode
+          - decode
+          - --publish-events-and-metrics
+          env:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          volumeMounts:
+          - name: nvidia-config
+            mountPath: /workspace/optrt-config
+            readOnly: true
+          - name: deepseek-v32-nextn-model
+            mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+            readOnly: true
+          - name: smcsd-draft-model
+            mountPath: /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
+            readOnly: true

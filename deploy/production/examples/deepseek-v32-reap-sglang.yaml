@@ -3,13 +3,14 @@
 
 # DeepSeek V3.2 REAP SpinQuant ActKV NVFP4 on the Dynamo production profile.
 #
-# This A4 deployment uses disaggregated SGLang serving with one 4-GPU prefill
-# role and one 4-GPU decode role on a single 8-GPU B200 node. The deployment
-# keeps DP attention, event-backed KV-aware routing, HF-declared HIGGS dense
-# MLA KV, HF-declared NVFP4 IndexCache+HISA, and decode-side HiSparse. HiCache
-# is intentionally omitted because HiSparse requires the no-radix decode path.
-# Speculation is decode-only through SMC-SD. LayerSplit is not enabled in this
-# 4+4 DP=4 profile because the prefill worker does not have effective CP>1.
+# This A4 deployment uses the selected single-node B200 production topology:
+# one 4-GPU prefill role and two 2-GPU decode replicas. The deployment keeps
+# event-backed KV-aware routing, FastOkenS tokenization, HF-declared HIGGS dense
+# MLA KV, HF-declared NVFP4 IndexCache+HISA, LayerSplit CP=4 on prefill,
+# TokenSpeed MLA attention backends, decode-side HiSparse, WarpDecode, and
+# decode-only SMC-SD. HiCache is intentionally omitted because HiSparse requires
+# the no-radix decode path. FlashSampling and NCCLX are not enabled in this
+# production profile.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -21,6 +22,14 @@ metadata:
 spec:
   backendFramework: sglang
   envs:
+    - name: SGLANG_WARP_DECODE_CUTE
+      value: "auto"
+    - name: SGLANG_ENABLE_WARP_DECODE
+      value: "1"
+    - name: UCX_TLS
+      value: "cuda_copy,cuda_ipc,tcp"
+    - name: SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER
+      value: "1"
     - name: HF_HOME
       value: /models
     - name: HF_HUB_OFFLINE
@@ -66,6 +75,11 @@ spec:
           kubernetes.io/hostname: a4-us-001-rl9
         tolerations:
           - operator: Exists
+        volumes:
+          - name: deepseek-v32-reap-model
+            hostPath:
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              type: Directory
         mainContainer:
           image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
           imagePullPolicy: IfNotPresent
@@ -80,8 +94,14 @@ spec:
             - --router-reset-states
             - --dyn-chat-processor
             - dynamo
+            - --tokenizer
+            - fastokens
             - --http-port
             - "8000"
+          volumeMounts:
+            - name: deepseek-v32-reap-model
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              readOnly: true
           env:
             - name: POD_UID
               valueFrom:
@@ -143,28 +163,32 @@ spec:
             - --tp
             - "4"
             - --dp
-            - "4"
-            - --enable-dp-attention
+            - "1"
             - --mem-fraction-static
-            - "0.80"
+            - "0.66"
             - --max-running-requests
-            - "8"
+            - "32"
             - --context-length
-            - "73728"
+            - "140000"
             - --max-total-tokens
-            - "524288"
+            - "1048576"
             - --cuda-graph-max-bs
-            - "8"
+            - "48"
             - --disable-custom-all-reduce
             - --disable-flashinfer-autotune
+            - --enable-dsa-prefill-context-parallel
+            - --attention-context-parallel-size
+            - "4"
+            - --dsa-prefill-cp-kv-storage-mode
+            - "layersplit"
             - --watchdog-timeout
             - "1800"
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
             - --nsa-prefill-backend
-            - flashmla_sparse
+            - tokenspeed_mla
             - --nsa-decode-backend
-            - flashmla_sparse
+            - tokenspeed_mla
             - --disaggregation-mode
             - prefill
             - --disaggregation-transfer-backend
@@ -198,13 +222,13 @@ spec:
     decode:
       componentType: worker
       subComponentType: decode
-      replicas: 1
+      replicas: 2
       envFromSecret: hf-token-secret
       resources:
         limits:
-          gpu: "4"
+          gpu: "2"
         requests:
-          gpu: "4"
+          gpu: "2"
       sharedMemory:
         size: 120Gi
       extraPodSpec:
@@ -246,20 +270,19 @@ spec:
             - --kv-cache-dtype
             - bfloat16
             - --tp
-            - "4"
+            - "2"
             - --dp
-            - "4"
-            - --enable-dp-attention
+            - "1"
             - --mem-fraction-static
-            - "0.80"
+            - "0.64"
             - --max-running-requests
-            - "8"
+            - "32"
             - --context-length
-            - "73728"
+            - "140000"
             - --max-total-tokens
-            - "524288"
+            - "1048576"
             - --cuda-graph-max-bs
-            - "8"
+            - "48"
             - --disable-custom-all-reduce
             - --disable-flashinfer-autotune
             - --watchdog-timeout
@@ -268,9 +291,9 @@ spec:
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
             - --nsa-prefill-backend
-            - flashmla_sparse
+            - tokenspeed_mla
             - --nsa-decode-backend
-            - flashmla_sparse
+            - tokenspeed_mla
             - --enable-hisparse
             - --hisparse-config
             - '{"top_k":1024,"device_buffer_size":6144,"host_to_device_ratio":10}'
