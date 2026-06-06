@@ -130,6 +130,17 @@ Required comparison: UCX baseline, UCX with MORI-style pinning, NIXL baseline, N
 
 
 
+
+## Current swapabodd Dependency Probe
+
+The latest parent image seen in this workspace is `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-swapabodd-20260606`, built from the SMC odd-draft SwapAB tuning fix. A non-GPU dependency probe shows the image is UCX/NIXL-runnable at the package/library level and still not native-MORI or Mooncake runnable:
+
+- runnable: `UCX`, `NIXL`
+- blocked: `MOONCAKE` because `libtensorrt_llm_mooncake_wrapper.so` and `libtransfer_engine.so` are absent
+- blocked: `NATIVE_MORI` because `mori.io`, `mori.cpp.TransferStatus`, `libtensorrt_llm_mori_wrapper.so`, and the minimum `mori.io` IOEngine/MemoryDesc/RDMA API are absent
+
+The checked-in current-image NIXL manifest is `deploy/production/examples/deepseek-v32-nextn-optrt-swapabodd-nixl.yaml`. It is only a prepared A/B candidate; do not apply it while the parent canary owns GPUs.
+
 ## Current multidecode Dependency Probe
 
 The current parent image `local/dynamo-trtllm-optrt-custom:canonical-smc-r20-fullsrc-ls-kvarn2-nvlsfix-smcfi-multidecode-20260606` has been probed without GPUs. It contains `libtensorrt_llm_ucx_wrapper.so`, `libtensorrt_llm_nixl_wrapper.so`, NIXL Python packages, and `/opt/nvidia/nvda_nixl`, so UCX and NIXL are library-runnable candidates. It does not contain `mori.io`, `mori.cpp.TransferStatus`, `libtensorrt_llm_mori_wrapper.so`, `libtensorrt_llm_mooncake_wrapper.so`, or `libtransfer_engine.so`, so native MORI and Mooncake remain blocked.
