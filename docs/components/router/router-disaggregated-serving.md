@@ -119,6 +119,13 @@ unpinned KV receive. The decode request still receives the original
 `PrefillResult.disaggregated_params`; the markers are proof and audit metadata,
 not a replacement for the engine-owned transfer payload.
 
+The router also logs cleanup lifecycle proof. A normally drained routed request
+emits `dynamo request pin cleared`. If the stream is dropped early, for example
+because the client closes the connection, the drop guard first emits
+`dynamo request pin cleanup scheduled` and then emits `dynamo request pin cleared`
+from the async cleanup task after freeing router state and scheduling any deferred
+worker session close.
+
 Production gates should require all of the following for a pinned disaggregated
 request:
 
@@ -126,3 +133,9 @@ request:
   request id;
 - one `dynamo disagg request pin established` marker;
 - one `dynamo disagg request pin outbound to decode` marker;
+- `dynamo request pin cleanup scheduled` on an early-close smoke and
+  `dynamo request pin cleared` for the same lifecycle request id;
+- matching request id across route-selection, established, outbound, and cleanup
+  markers;
+- positive backend-specific KV transfer proof, such as NIXL transfer start and
+  completion markers with nonzero transferred blocks.

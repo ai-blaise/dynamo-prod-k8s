@@ -181,6 +181,13 @@ impl RequestGuard {
         if let Some(close) = self.deferred_close.take() {
             close.execute(&self.context_id);
         }
+
+        tracing::info!(
+            request_id = %self.context_id,
+            scheduler_tracked = self.scheduler_tracked,
+            cleanup_path = "finish",
+            "dynamo request pin cleared"
+        );
     }
 
     fn record_metrics(&mut self) {
@@ -233,6 +240,14 @@ impl Drop for RequestGuard {
             return;
         };
 
+        tracing::info!(
+            request_id = %self.context_id,
+            scheduler_tracked = needs_free,
+            session_close = deferred_close.is_some(),
+            cleanup_path = "drop_guard",
+            "dynamo request pin cleanup scheduled"
+        );
+
         // Mirror finish(): free the scheduler slot first, then fire the
         // deferred session close so the worker's KV isn't released while
         // generation teardown is still in progress.
@@ -245,6 +260,12 @@ impl Drop for RequestGuard {
             if let Some(close) = deferred_close {
                 close.execute(&context_id);
             }
+            tracing::info!(
+                request_id = %context_id,
+                scheduler_tracked = needs_free,
+                cleanup_path = "drop_guard",
+                "dynamo request pin cleared"
+            );
         });
     }
 }
