@@ -39,6 +39,7 @@ pub(super) enum PrefillOutcome {
     },
 }
 
+#[derive(Debug)]
 pub(super) struct CompletedPrefillPinMetadata {
     pub prefill_worker_id: u64,
     pub prefill_dp_rank: u32,
@@ -63,12 +64,7 @@ pub(super) fn completed_prefill_pin_metadata(
             request_id
         ));
     };
-    let Some(ctx_info_endpoint) = result
-        .disaggregated_params
-        .get("ctx_info_endpoint")
-        .and_then(|v| v.as_str())
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(ctx_info_endpoint) = ctx_info_endpoint_for_pin(&result.disaggregated_params) else {
         return Err(anyhow::anyhow!(
             "Completed prefill request {} did not return ctx_info_endpoint metadata; refusing unpinned decode handoff",
             request_id
@@ -83,9 +79,28 @@ pub(super) fn completed_prefill_pin_metadata(
     Ok(CompletedPrefillPinMetadata {
         prefill_worker_id,
         prefill_dp_rank,
-        ctx_info_endpoint: ctx_info_endpoint.to_string(),
+        ctx_info_endpoint,
         disagg_request_id: disagg_request_id.to_string(),
     })
+}
+
+fn ctx_info_endpoint_for_pin(params: &serde_json::Value) -> Option<String> {
+    match params.get("ctx_info_endpoint")? {
+        serde_json::Value::String(endpoint) if !endpoint.is_empty() => Some(endpoint.clone()),
+        serde_json::Value::Array(endpoints) => {
+            let mut rendered = Vec::with_capacity(endpoints.len());
+            for endpoint in endpoints {
+                let endpoint = endpoint.as_str().filter(|value| !value.is_empty())?;
+                rendered.push(endpoint);
+            }
+            if rendered.is_empty() {
+                None
+            } else {
+                Some(rendered.join(","))
+            }
+        }
+        _ => None,
+    }
 }
 
 pub(super) enum PrefillResolveDecision {
@@ -148,6 +163,44 @@ mod tests {
                 .expect("metadata should be valid");
 
         assert_eq!(metadata.disagg_request_id, "request-123");
+    }
+
+    #[test]
+    fn completed_prefill_pin_metadata_accepts_trtllm_endpoint_array() {
+        let result = prefill_result(json!({
+            "ctx_info_endpoint": ["nixl://ctx/0"],
+            "disagg_request_id": "disagg-123"
+        }));
+
+        let metadata =
+            completed_prefill_pin_metadata(&result, Some((42, Some(3))), "request-123")
+                .expect("TRT-LLM endpoint arrays should be valid");
+
+        assert_eq!(metadata.ctx_info_endpoint, "nixl://ctx/0");
+        assert_eq!(metadata.disagg_request_id, "disagg-123");
+    }
+
+    #[test]
+    fn completed_prefill_pin_metadata_renders_multiple_endpoint_array() {
+        let result = prefill_result(json!({
+            "ctx_info_endpoint": ["nixl://ctx/0", "nixl://ctx/1"]
+        }));
+
+        let metadata =
+            completed_prefill_pin_metadata(&result, Some((42, Some(3))), "request-123")
+                .expect("endpoint arrays should be valid");
+
+        assert_eq!(metadata.ctx_info_endpoint, "nixl://ctx/0,nixl://ctx/1");
+    }
+
+    #[test]
+    fn completed_prefill_pin_metadata_rejects_malformed_endpoint_array() {
+        let result = prefill_result(json!({"ctx_info_endpoint": ["nixl://ctx/0", null]}));
+
+        let err = completed_prefill_pin_metadata(&result, Some((42, Some(3))), "request-123")
+            .expect_err("malformed ctx_info_endpoint arrays must fail closed");
+
+        assert!(err.to_string().contains("ctx_info_endpoint"));
     }
 
     #[test]
