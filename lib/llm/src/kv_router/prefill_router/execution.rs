@@ -227,7 +227,12 @@ impl PrefillRouter {
                     .map(|r| r as u32);
                 Some((worker_id, dp_rank))
             })
-            .or_else(|| tracker.as_ref().and_then(|tracker| tracker.get_worker_info()));
+            .or_else(|| {
+                tracker.as_ref().and_then(|tracker| {
+                    let worker_info = tracker.get_worker_info()?;
+                    Some((worker_info.prefill_worker_id?, worker_info.prefill_dp_rank))
+                })
+            });
 
         tracing::debug!(
             worker_info = ?worker_info,
