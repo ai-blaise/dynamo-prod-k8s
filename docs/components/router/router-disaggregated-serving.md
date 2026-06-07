@@ -115,9 +115,11 @@ dynamo disagg request pin outbound to decode request_id=<id> disagg_request_id=<
 Completed-prefill handoff is fail-closed for the metadata required by those
 markers. If prefill does not return worker id, prefill DP rank, or a non-empty
 `ctx_info_endpoint`, the router refuses to route decode rather than allowing an
-unpinned KV receive. The decode request still receives the original
-`PrefillResult.disaggregated_params`; the markers are proof and audit metadata,
-not a replacement for the engine-owned transfer payload.
+unpinned KV receive. TRT-LLM may encode `ctx_info_endpoint` either as a scalar
+string or as an array of endpoint strings; the router accepts both forms for pin
+proofs and rejects empty or malformed arrays. The decode request still receives
+the original `PrefillResult.disaggregated_params`; the markers are proof and
+audit metadata, not a replacement for the engine-owned transfer payload.
 
 The worker id and DP-rank proof may come from either the prefill engine's
 `disaggregated_params.worker_id` payload or the router tracker entry recorded
