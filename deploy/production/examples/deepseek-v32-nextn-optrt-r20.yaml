@@ -1,0 +1,596 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek-V3.2 NextN-Graft TensorRT-LLM op-trt production candidate.
+#
+# This file mirrors the current r20 pre-A/B gate shape from TensorRT-LLM/op-trt:
+# one 4-GPU prefill worker (TP2 x CP2 LayerSplit) and one 4-GPU decode worker
+# (TP4, WarpDecode) on a single 8xB200 node. NIXL is the KV-transfer gate,
+# dense MLA latent KV uses 2-bit KVarN, SMC-SD remains deferred until its GLM
+# draft-kernel path and Moondream decode composition pass live E2E, and UCX,
+# Mooncake, and MORI-IO are reserved for later A/B comparison.
+#
+# Required substitutions before apply:
+#   TARGET_NODE=<B200 node hostname>
+#   UNIFIED_IMAGE=<validated op-trt image>
+#
+# =============================================================================
+# Disagg P/D r20 -- cell1 DP2/TP4-disagg winner, custom pieces toggled ON.
+#
+# Topology (exact): single 8xB200 node.
+#   * 1 PREFILL worker -- TP2xCP2 LayerSplit / EP4, enable_attention_dp=false, 4 GPUs,
+#       LayerSplit ON   (prefill.yaml: sparse_attention_config.layersplit_enabled=true)
+#   * 1 DECODE  worker -- TP4 / EP4, enable_attention_dp=true, GPUs 4-7,
+#       WarpDecode ON   (decode.yaml: moe_config.warp_decode.enabled=true, tile_mode=decode_1cta
+#                        + env TRTLLM_WARP_DECODE_FIXED_TACTIC=1)
+#   * 1 Frontend (KV router) -- dynamo.frontend, http :8000
+#
+# Target node: set TARGET_NODE before envsubst. The 001 VM is the canary/build
+# lane before this manifest is rolled onto the more-validated 002 live path.
+# The disaggregated prefill/decode artifact is this DynamoGraphDeployment CRD
+# (nvidia.com/v1alpha1), which is k3s-native and is the pre-A/B gate for NIXL,
+# LayerSplit owner-local handoff, request pinning, WarpDecode, and dense KVarN.
+#
+# Image: BOTH workers + frontend run the unified NIXL/LayerSplit gate image.
+# Parameterized as ${UNIFIED_IMAGE}; confirm the image tag with the build agent
+# before apply.
+# Substitute at deploy time, e.g.:
+#   TARGET_NODE=a4-us-002-rl9 \
+#   UNIFIED_IMAGE=localhost:5000/local/dynamo-trtllm-optrt-custom:<nixl-layer-split-gate-tag> \
+#     envsubst < deepseek-v32-nextn-optrt.yaml | \
+#     KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl apply -f -
+#
+# DO NOT apply here -- the orchestrator owns the gated deploy.
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v32-nextn-optrt-config
+  namespace: dynamo-system
+data:
+  prefill.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 2
+    moe_expert_parallel_size: 4
+    context_parallel_size: 2
+    cp_config:
+      cp_type: LAYERSPLIT
+    enable_attention_dp: false
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: false
+    allreduce_strategy: AUTO
+    use_cute_dsl_blockscaling_bmm: true
+    use_cute_dsl_bf16_bmm: true
+    max_batch_size: 32
+    max_input_len: 131072
+    max_seq_len: 132096
+    max_num_tokens: 8192
+    print_iter_log: false
+    stream_interval: 50
+    num_postprocess_workers: 8
+    cuda_graph_config:
+      enable_padding: true
+      batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 32, 48, 64]
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: true
+      free_gpu_memory_fraction: 0.7
+      tokens_per_block: 64
+    cache_transceiver_config:
+      # NIXL is the pre-A/B KV-transfer gate.
+      # UCX remains available only as an A/B comparison candidate.
+      backend: NIXL
+      max_tokens_in_buffer: 131072
+    moe_config:
+      backend: WARPDECODE
+      use_low_precision_moe_combine: true
+      warp_decode:
+        enabled: false
+        tile_mode: autotune
+    nvfp4_gemm_config:
+      allowed_backends: [cutlass, cublaslt, cuda_core]
+    sparse_attention_config:
+      algorithm: dsa
+      indexer_mode: indexcache-hisa
+      index_n_heads: 64
+      index_head_dim: 128
+      index_topk: 1024
+      index_topk_pattern: FSSS
+      index_topk_freq: 4
+      indexer_k_dtype: fp4
+      # Dense MLA latent KV uses 2-bit KVarN. This is intentionally separate
+      # from Indexer K above; KVarN is dense compressed_kv+k_pe storage only.
+      mla_latent_kv_dtype: kvarn_k2v2
+      mla_latent_kv_amortize: true
+      enable_nvfp4_hisa: true
+      hisa_block_size: 128
+      hisa_block_topk: 64
+      hisa_compression_ratio: 4.0
+      hisa_min_seq_len: 65536
+      hisa_execution_mode: optimized
+      use_cute_dsl_topk: true
+      use_cute_dsl_paged_mqa_logits: true
+      # LayerSplit handoff over TRT-LLM NIXL transfer: prefill owns
+      # CP-sharded DSA KV/indexer-K cache, then the transceiver writes and
+      # reassembles it into decode's pre-allocated TP4/CP1 cache. Keep all CP
+      # ranks participating until a partial-rank protocol is implemented.
+      layersplit_enabled: true
+      layersplit_owner_assignment: contiguous
+      layersplit_transfer_backend: nixl
+      layersplit_all_cp_ranks_transfer: true
+      layersplit_owner_local_alloc: true
+  decode.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 4
+    moe_expert_parallel_size: 4
+    context_parallel_size: 1
+    enable_attention_dp: true
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: false
+    # DeepSeek decode should run attention-DP/local dense MLP ownership rather
+    # than exercising the dense MLP TP allreduce path during warmup.
+    allreduce_strategy: MNNVL
+    use_cute_dsl_blockscaling_bmm: true
+    use_cute_dsl_bf16_bmm: true
+    max_batch_size: 64
+    max_input_len: 131072
+    max_seq_len: 132096
+    max_num_tokens: 2048
+    print_iter_log: false
+    stream_interval: 50
+    num_postprocess_workers: 8
+    cuda_graph_config:
+      enable_padding: true
+      batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 32, 48, 64]
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.45
+      tokens_per_block: 64
+    cache_transceiver_config:
+      # NIXL is the pre-A/B KV-transfer gate.
+      # UCX remains available only as an A/B comparison candidate.
+      backend: NIXL
+      max_tokens_in_buffer: 131072
+    moe_config:
+      backend: WARPDECODE
+      use_low_precision_moe_combine: true
+      warp_decode:
+        enabled: true
+        tile_mode: decode_1cta
+        policy: force
+        allow_parallelism_fallback: false
+        max_batch_size: 64
+    nvfp4_gemm_config:
+      allowed_backends: [cutlass, cublaslt, cuda_core]
+    sparse_attention_config:
+      algorithm: dsa
+      indexer_mode: indexcache-hisa
+      index_n_heads: 64
+      index_head_dim: 128
+      index_topk: 1024
+      index_topk_pattern: FSSS
+      index_topk_freq: 4
+      indexer_k_dtype: fp4
+      # Dense MLA latent KV uses 2-bit KVarN. Indexer K remains fp4.
+      mla_latent_kv_dtype: kvarn_k2v2
+      mla_latent_kv_amortize: true
+      enable_nvfp4_hisa: true
+      hisa_block_size: 128
+      hisa_block_topk: 64
+      hisa_compression_ratio: 4.0
+      hisa_min_seq_len: 65536
+      hisa_execution_mode: optimized
+      use_cute_dsl_topk: true
+      use_cute_dsl_paged_mqa_logits: true
+      layersplit_enabled: false
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v32-nextn-optrt
+  namespace: dynamo-system
+  labels:
+    ai-blaise.io/inference-engine: tensorrt-llm-op-trt
+    ai-blaise.io/topology: c1-dp2tp4-disagg-r20
+    app.kubernetes.io/part-of: dynamo-production
+spec:
+  backendFramework: trtllm
+  services:
+    Frontend:
+      componentType: frontend
+      envFromSecret: hf-token-secret
+      replicas: 1
+      envs:
+      - name: DYN_LOG
+        value: info
+      - name: DYN_TOKENIZER
+        value: fastokens
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: ${TARGET_NODE}
+        tolerations:
+        - operator: Exists
+        mainContainer:
+          image: ${UNIFIED_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --http-port
+          - '8000'
+          - --router-mode
+          - kv
+          volumeMounts:
+          - mountPath: /models
+            name: models
+            readOnly: true
+        volumes:
+        - name: models
+          hostPath:
+            path: /models
+            type: Directory
+    prefill:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        requests:
+          cpu: '48'
+          memory: 384Gi
+          gpu: '4'
+        limits:
+          gpu: '4'
+      envs:
+      - name: OMPI_MCA_pml
+        value: ob1
+      - name: OMPI_MCA_btl
+        value: self,tcp,vader
+      - name: UCX_TLS
+        value: tcp,self,sm,cuda_copy,cuda_ipc
+      - name: NCCL_IB_DISABLE
+        value: '1'
+      - name: NCCL_MNNVL_ENABLE
+        value: '1'
+      - name: NCCL_CUMEM_ENABLE
+        value: '1'
+      - name: NCCL_NVLS_ENABLE
+        # LayerSplit prefill uses TP and CP subgroup allreduces. On the tested
+        # B200/K3s stack, NCCL NVLS multicast binding fails for those subgroups
+        # with CUDA error 999, while CUMEM/P2P completes cleanly.
+        value: '0'
+      - name: NCCL_GRAPH_MIXING_SUPPORT
+        value: '0'
+      - name: NCCL_NET_PLUGIN
+        value: none
+      - name: NVIDIA_GDRCOPY
+        value: '1'
+      - name: UCX_CUDA_IPC_ENABLE_MNNVL
+        value: '0'
+      - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
+        value: '1'
+      - name: TRTLLM_ENABLE_PDL
+        value: '1'
+      - name: TRTLLM_SERVER_DISABLE_GC
+        value: '1'
+      - name: TRTLLM_WORKER_DISABLE_GC
+        value: '1'
+      - name: TRTLLM_FORCE_COMM_METHOD
+        value: NVLINK_TWO_SIDED
+      - name: ENABLE_CONFIGURABLE_MOE
+        value: '1'
+      - name: TLLM_LOG_LEVEL
+        value: WARNING
+      - name: HF_HOME
+        value: /models
+      - name: HF_HUB_OFFLINE
+        value: '1'
+      - name: HF_MODULES_CACHE
+        value: /cache/optrt/hf_modules
+      - name: TRANSFORMERS_CACHE
+        value: /cache/optrt/transformers
+      - name: HF_DATASETS_CACHE
+        value: /cache/optrt/hf_datasets
+      - name: XDG_CACHE_HOME
+        value: /cache/optrt/xdg
+      - name: PIP_CACHE_DIR
+        value: /cache/optrt/pip
+      - name: TORCH_EXTENSIONS_DIR
+        value: /cache/optrt/torch_extensions
+      - name: TORCHINDUCTOR_CACHE_DIR
+        value: /cache/optrt/torchinductor
+      - name: TRITON_CACHE_DIR
+        value: /cache/optrt/triton
+      - name: CUDA_CACHE_PATH
+        value: /cache/optrt/cuda
+      - name: DG_JIT_CACHE_DIR
+        value: /cache/optrt/deep_gemm
+      - name: TRTLLM_DG_CACHE_DIR
+        value: /cache/optrt/tensorrt_llm/dg
+      - name: TLLM_LLMAPI_BUILD_CACHE
+        value: '1'
+      - name: TLLM_LLMAPI_BUILD_CACHE_ROOT
+        value: /cache/optrt/tensorrt_llm/llmapi_build
+      - name: PYTHONUNBUFFERED
+        value: '1'
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: ${TARGET_NODE}
+        tolerations:
+        - operator: Exists
+        initContainers:
+        - name: prepare-optrt-cache
+          image: ${UNIFIED_IMAGE}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+          - sh
+          - -lc
+          - mkdir -p /cache/optrt/hf_modules /cache/optrt/transformers /cache/optrt/hf_datasets /cache/optrt/xdg /cache/optrt/pip /cache/optrt/torch_extensions /cache/optrt/torchinductor /cache/optrt/triton /cache/optrt/cuda /cache/optrt/deep_gemm /cache/optrt/tensorrt_llm/dg /cache/optrt/tensorrt_llm/llmapi_build && chmod -R 0777 /cache/optrt
+          volumeMounts:
+          - mountPath: /cache/optrt
+            name: optrt-cache
+        mainContainer:
+          image: ${UNIFIED_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --model-path
+          - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --served-model-name
+          - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --disaggregation-mode
+          - prefill
+          - --tensor-parallel-size
+          - '2'
+          - --expert-parallel-size
+          - '4'
+          - --gpus-per-node
+          - '4'
+          - --max-batch-size
+          - '32'
+          - --max-num-tokens
+          - '8192'
+          - --max-seq-len
+          - '132096'
+          - --free-gpu-memory-fraction
+          - '0.7'
+          - --kv-block-size
+          - '64'
+          - --connector
+          - none
+          - --extra-engine-args
+          - /workspace/optrt-config/prefill.yaml
+          - --publish-events-and-metrics
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          volumeMounts:
+          - mountPath: /workspace/optrt-config
+            name: nvidia-config
+            readOnly: true
+          - mountPath: /models
+            name: models
+            readOnly: true
+          - mountPath: /cache/optrt
+            name: optrt-cache
+        volumes:
+        - name: nvidia-config
+          configMap:
+            name: deepseek-v32-nextn-optrt-config
+        - name: models
+          hostPath:
+            path: /models
+            type: Directory
+        - name: optrt-cache
+          hostPath:
+            path: /var/lib/optrt-cache
+            type: DirectoryOrCreate
+    decode:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        requests:
+          cpu: '48'
+          memory: 384Gi
+          gpu: '4'
+        limits:
+          gpu: '4'
+      envs:
+      - name: OMPI_MCA_pml
+        value: ob1
+      - name: OMPI_MCA_btl
+        value: self,tcp,vader
+      - name: UCX_TLS
+        value: tcp,self,sm,cuda_copy,cuda_ipc
+      - name: NCCL_IB_DISABLE
+        value: '1'
+      - name: NCCL_MNNVL_ENABLE
+        value: '1'
+      - name: NCCL_CUMEM_ENABLE
+        value: '1'
+      - name: NCCL_NVLS_ENABLE
+        value: '1'
+      - name: NCCL_GRAPH_MIXING_SUPPORT
+        value: '0'
+      # Single-node NVLink path: avoid external NCCL net plugin loading.
+      - name: NCCL_NET_PLUGIN
+        value: none
+      - name: NVIDIA_GDRCOPY
+        value: '1'
+      - name: UCX_CUDA_IPC_ENABLE_MNNVL
+        value: '0'
+      - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
+        value: '1'
+      - name: TRTLLM_ENABLE_PDL
+        value: '1'
+      # WarpDecode fixed-tactic overlay, default-on (pins retuned NVFP4 tactic in-graph)
+      - name: TRTLLM_WARP_DECODE_FIXED_TACTIC
+        value: '1'
+      - name: TRTLLM_SERVER_DISABLE_GC
+        value: '1'
+      - name: TRTLLM_WORKER_DISABLE_GC
+        value: '1'
+      - name: TRTLLM_FORCE_COMM_METHOD
+        value: NVLINK_TWO_SIDED
+      - name: ENABLE_CONFIGURABLE_MOE
+        value: '1'
+      - name: TLLM_LOG_LEVEL
+        value: WARNING
+      - name: HF_HOME
+        value: /models
+      - name: HF_HUB_OFFLINE
+        value: '1'
+      - name: HF_MODULES_CACHE
+        value: /cache/optrt/hf_modules
+      - name: TRANSFORMERS_CACHE
+        value: /cache/optrt/transformers
+      - name: HF_DATASETS_CACHE
+        value: /cache/optrt/hf_datasets
+      - name: XDG_CACHE_HOME
+        value: /cache/optrt/xdg
+      - name: PIP_CACHE_DIR
+        value: /cache/optrt/pip
+      - name: TORCH_EXTENSIONS_DIR
+        value: /cache/optrt/torch_extensions
+      - name: TORCHINDUCTOR_CACHE_DIR
+        value: /cache/optrt/torchinductor
+      - name: TRITON_CACHE_DIR
+        value: /cache/optrt/triton
+      - name: CUDA_CACHE_PATH
+        value: /cache/optrt/cuda
+      - name: DG_JIT_CACHE_DIR
+        value: /cache/optrt/deep_gemm
+      - name: TRTLLM_DG_CACHE_DIR
+        value: /cache/optrt/tensorrt_llm/dg
+      - name: TLLM_LLMAPI_BUILD_CACHE
+        value: '1'
+      - name: TLLM_LLMAPI_BUILD_CACHE_ROOT
+        value: /cache/optrt/tensorrt_llm/llmapi_build
+      - name: PYTHONUNBUFFERED
+        value: '1'
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: ${TARGET_NODE}
+        tolerations:
+        - operator: Exists
+        initContainers:
+        - name: prepare-optrt-cache
+          image: ${UNIFIED_IMAGE}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+          - sh
+          - -lc
+          - mkdir -p /cache/optrt/hf_modules /cache/optrt/transformers /cache/optrt/hf_datasets /cache/optrt/xdg /cache/optrt/pip /cache/optrt/torch_extensions /cache/optrt/torchinductor /cache/optrt/triton /cache/optrt/cuda /cache/optrt/deep_gemm /cache/optrt/tensorrt_llm/dg /cache/optrt/tensorrt_llm/llmapi_build && chmod -R 0777 /cache/optrt
+          volumeMounts:
+          - mountPath: /cache/optrt
+            name: optrt-cache
+        mainContainer:
+          image: ${UNIFIED_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --model-path
+          - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --served-model-name
+          - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
+          - --disaggregation-mode
+          - decode
+          - --tensor-parallel-size
+          - '4'
+          - --expert-parallel-size
+          - '4'
+          - --gpus-per-node
+          - '4'
+          - --max-batch-size
+          - '64'
+          - --max-num-tokens
+          - '8192'
+          - --max-seq-len
+          - '132096'
+          - --free-gpu-memory-fraction
+          - '0.8'
+          - --kv-block-size
+          - '64'
+          - --connector
+          - none
+          - --extra-engine-args
+          - /workspace/optrt-config/decode.yaml
+          - --publish-events-and-metrics
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          volumeMounts:
+          - mountPath: /workspace/optrt-config
+            name: nvidia-config
+            readOnly: true
+          - mountPath: /models
+            name: models
+            readOnly: true
+          - mountPath: /cache/optrt
+            name: optrt-cache
+        volumes:
+        - name: nvidia-config
+          configMap:
+            name: deepseek-v32-nextn-optrt-config
+        - name: models
+          hostPath:
+            path: /models
+            type: Directory
+        - name: optrt-cache
+          hostPath:
+            path: /var/lib/optrt-cache
+            type: DirectoryOrCreate
