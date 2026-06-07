@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use futures::StreamExt;
+use serde_json::{Map, Value, json};
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
@@ -16,6 +17,8 @@ use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
     preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
 };
+
+const TRTLLM_GEN_FIRST_PARAMS_KEY: &str = "trtllm_generation_first_disaggregated_params";
 
 pub(super) struct PrefillCompletion {
     pub result: PrefillResult,
@@ -90,6 +93,36 @@ impl PrefillRouter {
                 Err(_) => return PrefillResolveDecision::Unavailable,
             }
         };
+
+        if let Some(runtime_params) = self.model_manager.get_worker_runtime_data(
+            endpoint_id,
+            worker_id,
+            TRTLLM_GEN_FIRST_PARAMS_KEY,
+        ) {
+            let r: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
+            match build_trtllm_generation_first_params(runtime_params, dp_rank, r) {
+                Some((prefill_params, decode_params)) => {
+                    tracing::debug!(
+                        worker_id = worker_id,
+                        dp_rank = ?dp_rank,
+                        disagg_request_id = r,
+                        "Built TRT-LLM generation-first NIXL handoff before prefill"
+                    );
+                    return PrefillResolveDecision::TrtllmGenerationFirst {
+                        worker_id,
+                        dp_rank,
+                        prefill_params,
+                        decode_params,
+                    };
+                }
+                None => {
+                    tracing::warn!(
+                        worker_id = worker_id,
+                        "Ignoring invalid TRT-LLM generation-first runtime metadata"
+                    );
+                }
+            }
+        }
 
         // Get bootstrap info from ModelManager (works for ANY mode)
         let Some(endpoint) = self
@@ -344,6 +377,45 @@ impl PrefillRouter {
     pub fn enforce_disagg(&self) -> bool {
         self.enforce_disagg
     }
+}
+
+fn build_trtllm_generation_first_params(
+    runtime_params: Value,
+    dp_rank: Option<u32>,
+    disagg_request_id: u64,
+) -> Option<(Value, Value)> {
+    let mut base: Map<String, Value> = runtime_params.as_object()?.clone();
+
+    let endpoint = match base.get("ctx_info_endpoint") {
+        Some(Value::String(s)) if !s.is_empty() => Value::String(s.clone()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .find_map(|v| v.as_str().filter(|s| !s.is_empty()))
+            .map(|s| Value::String(s.to_string()))?,
+        _ => return None,
+    };
+
+    base.insert("ctx_info_endpoint".to_string(), endpoint);
+    base.insert("schedule_style".to_string(), json!("generation_first"));
+    base.insert("disagg_request_id".to_string(), json!(disagg_request_id));
+    base.insert("ctx_request_id".to_string(), json!(disagg_request_id));
+
+    if let Some(rank) = dp_rank {
+        base.insert("ctx_dp_rank".to_string(), json!(rank));
+    } else if base
+        .get("ctx_dp_rank")
+        .is_some_and(|rank| rank.is_null())
+    {
+        base.remove("ctx_dp_rank");
+    }
+
+    let mut prefill = base.clone();
+    prefill.insert("request_type".to_string(), json!("context_only"));
+
+    let mut decode = base;
+    decode.insert("request_type".to_string(), json!("generation_only"));
+
+    Some((Value::Object(prefill), Value::Object(decode)))
 }
 
 /// Derive a `bootstrap_room` from a pre-sampled `r` such that

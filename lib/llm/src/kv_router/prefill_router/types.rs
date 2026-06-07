@@ -29,6 +29,10 @@ pub enum PrefillError {
 pub(super) enum PrefillOutcome {
     /// Bootstrap optimization: prefill spawned in background, bootstrap info ready
     Bootstrap(BootstrapInfo),
+    /// TRT-LLM/NIXL generation-first handoff: prefill is already running in
+    /// the background and decode receives a synthetic generation_only
+    /// prefill_result that points at decode-owned KV memory.
+    TrtllmGenerationFirst(serde_json::Value),
     /// Synchronous prefill completed with result. `worker_link` carries the
     /// prefill worker's `engine.generate` span pointer for the decode side
     /// to render as an OTel `Link` via `PreprocessedRequest.migration_link`.
@@ -43,6 +47,12 @@ pub(super) enum PrefillResolveDecision {
         worker_id: u64,
         dp_rank: Option<u32>,
         bootstrap_info: BootstrapInfo,
+    },
+    TrtllmGenerationFirst {
+        worker_id: u64,
+        dp_rank: Option<u32>,
+        prefill_params: serde_json::Value,
+        decode_params: serde_json::Value,
     },
     Unavailable,
     NotActivated,

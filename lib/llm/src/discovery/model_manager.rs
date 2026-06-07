@@ -987,6 +987,18 @@ impl ModelManager {
         let configs = rx.borrow();
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
+
+    /// Get engine-specific runtime metadata for a worker.
+    pub fn get_worker_runtime_data(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+        key: &str,
+    ) -> Option<serde_json::Value> {
+        let rx = self.runtime_configs.get(endpoint_id)?;
+        let configs = rx.borrow();
+        configs.get(&worker_id)?.runtime_data.get(key).cloned()
+    }
 }
 
 #[cfg(test)]

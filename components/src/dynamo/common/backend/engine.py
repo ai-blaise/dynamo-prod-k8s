@@ -32,7 +32,8 @@ class GenerateRequest(TypedDict, total=False):
     The remaining groups are optional — engines should access them
     defensively with ``.get(key, {})``.
 
-    Disaggregated-serving keys (``prefill_result``, ``bootstrap_info``)
+    Disaggregated-serving keys (``prefill_result``, ``bootstrap_info``,
+    ``disaggregated_params``/``extra_args``)
     are set by the frontend's PrefillRouter on decode requests; engines
     read them via ``dynamo.common.backend.disagg`` helpers.
     """
@@ -43,6 +44,8 @@ class GenerateRequest(TypedDict, total=False):
     output_options: dict[str, Any]
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
+    disaggregated_params: dict[str, Any]
+    extra_args: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):

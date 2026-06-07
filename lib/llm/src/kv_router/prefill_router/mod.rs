@@ -183,6 +183,54 @@ impl
 
                 Ok(PrefillOutcome::Bootstrap(bootstrap_info))
             }
+            PrefillResolveDecision::TrtllmGenerationFirst {
+                worker_id,
+                dp_rank,
+                prefill_params,
+                decode_params,
+            } => {
+                // TRT-LLM/NIXL write-mode equivalent: route context_only
+                // prefill and generation_only decode concurrently. Decode
+                // waits inside TRT-LLM until the prefill worker has pushed KV
+                // into the decode-owned cache slots.
+                if !self.router_mode.is_kv_routing()
+                    && let Some(router) = self.prefill_router.get()
+                {
+                    router.select_next_worker();
+                }
+
+                let routing = prefill_req.routing_mut();
+                routing.prefill_worker_id = Some(worker_id);
+                routing.dp_rank = dp_rank;
+                let mut extra_args = prefill_req
+                    .extra_args
+                    .take()
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                extra_args.insert(
+                    "trtllm_generation_first_disaggregated_params".to_string(),
+                    prefill_params,
+                );
+                prefill_req.extra_args = Some(serde_json::Value::Object(extra_args));
+
+                tracing::info!(
+                    request_id = %request_id,
+                    prefill_worker_id = worker_id,
+                    prefill_dp_rank = ?dp_rank,
+                    disaggregated_params = %decode_params,
+                    handoff_mode = "generation_first",
+                    "dynamo disagg request pin established"
+                );
+
+                let prefill_context = Context::with_id_and_metadata(
+                    prefill_req,
+                    request_id.clone(),
+                    metadata.clone(),
+                );
+                self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
+
+                Ok(PrefillOutcome::TrtllmGenerationFirst(decode_params))
+            }
             PrefillResolveDecision::Unavailable
             | PrefillResolveDecision::NotActivated
             | PrefillResolveDecision::NoBootstrapEndpoint => {
@@ -255,6 +303,20 @@ impl
                             "dynamo disagg request pin outbound to decode"
                         );
                         decode_req.bootstrap_info = Some(info);
+                    }
+                    PrefillOutcome::TrtllmGenerationFirst(disaggregated_params) => {
+                        tracing::info!(
+                            request_id = %request_id,
+                            disaggregated_params = %disaggregated_params,
+                            handoff_mode = "generation_first",
+                            "dynamo disagg request pin outbound to decode"
+                        );
+                        decode_req.prefill_result = Some(
+                            crate::protocols::common::preprocessor::PrefillResult {
+                                disaggregated_params,
+                                prompt_tokens_details: None,
+                            },
+                        );
                     }
                     PrefillOutcome::Completed {
                         result,

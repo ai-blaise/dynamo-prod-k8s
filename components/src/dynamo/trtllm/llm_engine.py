@@ -22,6 +22,7 @@ from dataclasses import asdict
 from typing import Any, Optional
 
 from tensorrt_llm.executor.result import GenerationResult
+from tensorrt_llm.disaggregated_params import DisaggScheduleStyle
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi import KvCacheConfig, SchedulerConfig
 from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
@@ -78,6 +79,7 @@ _IDLE_SLEEP_S = 0.01
 # Mirror the legacy `dynamo.trtllm` worker — required for TRT-LLM to actually
 # publish KV cache events. Without this, `get_kv_cache_events` returns empty.
 _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+_TRTLLM_GEN_FIRST_PARAMS_KEY = "trtllm_generation_first_disaggregated_params"
 
 
 # Bridges trtllm's local enum into the common one. ENCODE absent —
@@ -269,6 +271,7 @@ class TrtllmLLMEngine(LLMEngine):
         await self._engine.initialize()
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
+        runtime_data = self._runtime_disaggregated_params()
         if self._kv_routing_enabled():
             self._metrics_thread = threading.Thread(
                 target=self._metrics_poll_loop,
@@ -285,7 +288,48 @@ class TrtllmLLMEngine(LLMEngine):
             max_num_seqs=self.max_batch_size,
             max_num_batched_tokens=self.max_num_tokens,
             data_parallel_size=self._attention_dp_size,
+            runtime_data=runtime_data,
         )
+
+    def _runtime_disaggregated_params(self) -> dict[str, Any] | None:
+        """Publish static TRT-LLM/NIXL generation-first metadata.
+
+        The Python/native NIXL transceiver exposes its context endpoint before
+        any request runs. The frontend can use this metadata to route decode
+        concurrently with prefill, matching MORI-style write-mode orchestration
+        instead of waiting for a completed prefill response.
+        """
+        if (
+            self._engine is None
+            or self.disaggregation_mode != DisaggregationMode.PREFILL
+        ):
+            return None
+        try:
+            params = dict(self._engine.llm.disaggregated_params or {})
+        except Exception as e:
+            logger.warning("Unable to read TRT-LLM disaggregated_params: %s", e)
+            return None
+
+        endpoint = params.get("ctx_info_endpoint")
+        if isinstance(endpoint, list):
+            endpoint = next((x for x in endpoint if x), None)
+        if not endpoint:
+            logger.info(
+                "TRT-LLM did not publish ctx_info_endpoint; generation-first "
+                "NIXL routing will fall back to completed-prefill handoff"
+            )
+            return None
+
+        runtime_params: dict[str, Any] = {
+            "ctx_info_endpoint": endpoint,
+            "schedule_style": "generation_first",
+        }
+        if params.get("ctx_dp_rank") is not None:
+            runtime_params["ctx_dp_rank"] = params["ctx_dp_rank"]
+        logger.info(
+            "Publishing TRT-LLM generation-first NIXL endpoint for request pinning"
+        )
+        return {_TRTLLM_GEN_FIRST_PARAMS_KEY: runtime_params}
 
     # TRT-LLM's `get_kv_cache_events` / `get_stats` block the calling
     # thread, so we drive them from dedicated worker threads rather than
@@ -482,10 +526,21 @@ class TrtllmLLMEngine(LLMEngine):
         is_decode = self.disaggregation_mode == DisaggregationMode.DECODE
 
         if is_prefill:
-            disaggregated_params = LlmDisaggregatedParams(
-                request_type="context_only",
-                disagg_request_id=get_global_disagg_request_id(self._disagg_machine_id),
-            )
+            request_params = self._request_disaggregated_params(request)
+            if request_params is not None:
+                disaggregated_params = request_params
+                disaggregated_params.request_type = "context_only"
+                if disaggregated_params.disagg_request_id is None:
+                    disaggregated_params.disagg_request_id = get_global_disagg_request_id(
+                        self._disagg_machine_id
+                    )
+            else:
+                disaggregated_params = LlmDisaggregatedParams(
+                    request_type="context_only",
+                    disagg_request_id=get_global_disagg_request_id(
+                        self._disagg_machine_id
+                    ),
+                )
         elif is_decode:
             prefill_result = require_prefill_result(
                 request, _TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode]
@@ -582,6 +637,28 @@ class TrtllmLLMEngine(LLMEngine):
                 self._active_requests.pop(request_id, None)
 
     @staticmethod
+    def _request_disaggregated_params(
+        request: GenerateRequest,
+    ) -> LlmDisaggregatedParams | None:
+        params_dict = request.get("disaggregated_params")
+        if not params_dict:
+            extra_args = request.get("extra_args") or {}
+            if isinstance(extra_args, dict):
+                params_dict = extra_args.get(_TRTLLM_GEN_FIRST_PARAMS_KEY)
+        if not params_dict:
+            return None
+        params_dict = dict(params_dict)
+        endpoint = params_dict.get("ctx_info_endpoint")
+        if isinstance(endpoint, list):
+            params_dict["ctx_info_endpoint"] = next((x for x in endpoint if x), None)
+        if params_dict.get("schedule_style") in ("generation_first", 1):
+            params_dict["schedule_style"] = DisaggScheduleStyle.GENERATION_FIRST
+        elif params_dict.get("schedule_style") in ("context_first", 0):
+            params_dict["schedule_style"] = DisaggScheduleStyle.CONTEXT_FIRST
+        DisaggregatedParamsCodec.deserialize_first_gen_log_probs(params_dict)
+        return DisaggregatedParamsCodec.decode(LlmDisaggregatedParams(**params_dict))
+
+    @staticmethod
     def _decode_prefill_handoff(
         prefill_result: dict[str, Any],
     ) -> LlmDisaggregatedParams:
@@ -598,6 +675,10 @@ class TrtllmLLMEngine(LLMEngine):
         params_dict.pop("worker_id", None)
         DisaggregatedParamsCodec.deserialize_first_gen_log_probs(params_dict)
         params_dict.pop("_epd_metadata", None)
+        if params_dict.get("schedule_style") in ("generation_first", 1):
+            params_dict["schedule_style"] = DisaggScheduleStyle.GENERATION_FIRST
+        elif params_dict.get("schedule_style") in ("context_first", 0):
+            params_dict["schedule_style"] = DisaggScheduleStyle.CONTEXT_FIRST
         decoded = DisaggregatedParamsCodec.decode(DisaggregatedParams(**params_dict))
         decoded.request_type = "generation_only"
         # Already baked into the imported KV; clearing avoids a
