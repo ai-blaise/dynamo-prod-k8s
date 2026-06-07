@@ -464,12 +464,12 @@ impl KvPushRouter {
                     )
                     .await;
             } else {
-                tracing::debug!(
-                    request_id = %context_id,
-                    worker_id = pinned_worker_id,
-                    ?phase,
-                    "Routing to specified worker without resolved dp_rank; skipping scheduler bookkeeping"
-                );
+                return Err(anyhow::anyhow!(
+                    "Pinned worker {} for {:?} request {} could not resolve dp_rank; refusing to route without scheduler bookkeeping",
+                    pinned_worker_id,
+                    phase,
+                    context_id
+                ).into());
             }
         } else {
             tracing::debug!(
@@ -564,6 +564,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             cached_tokens,
             scheduler_tracked,
         } = selection;
+
+        tracing::info!(
+            request_id = %context_id,
+            worker_id = instance_id,
+            dp_rank = dp_rank,
+            scheduler_tracked = scheduler_tracked,
+            ?phase,
+            is_query_only = is_query_only,
+            "dynamo request pin route selected"
+        );
 
         // Record the routing decision into the indexer when:
         //   - approximate mode (use_kv_events=false): primary indexer is the

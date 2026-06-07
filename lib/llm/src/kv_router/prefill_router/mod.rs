@@ -152,6 +152,16 @@ impl
                 routing.dp_rank = dp_rank;
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
+                tracing::info!(
+                    request_id = %request_id,
+                    prefill_worker_id = worker_id,
+                    prefill_dp_rank = ?dp_rank,
+                    bootstrap_host = %bootstrap_info.bootstrap_host,
+                    bootstrap_port = bootstrap_info.bootstrap_port,
+                    bootstrap_room = bootstrap_info.bootstrap_room,
+                    "dynamo disagg request pin established"
+                );
+
                 // NVBugs 5969206: Do NOT link prefill as child of engine context.
                 // Kill propagation tears down the RPC transport, interrupting NIXL
                 // KV cache transfers and leaking blocks permanently. The prefill
@@ -237,6 +247,13 @@ impl
 
                 match outcome {
                     PrefillOutcome::Bootstrap(info) => {
+                        tracing::info!(
+                            request_id = %request_id,
+                            bootstrap_host = %info.bootstrap_host,
+                            bootstrap_port = info.bootstrap_port,
+                            bootstrap_room = info.bootstrap_room,
+                            "dynamo disagg request pin outbound to decode"
+                        );
                         decode_req.bootstrap_info = Some(info);
                     }
                     PrefillOutcome::Completed {
