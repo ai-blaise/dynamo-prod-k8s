@@ -119,6 +119,13 @@ unpinned KV receive. The decode request still receives the original
 `PrefillResult.disaggregated_params`; the markers are proof and audit metadata,
 not a replacement for the engine-owned transfer payload.
 
+The worker id and DP-rank proof may come from either the prefill engine's
+`disaggregated_params.worker_id` payload or the router tracker entry recorded
+when the prefill request was scheduled. The tracker path is still deterministic
+request pinning because it is the scheduling decision that selected the prefill
+worker. If both sources are absent, the completed-prefill path remains
+fail-closed.
+
 The router also logs cleanup lifecycle proof. A normally drained routed request
 emits `dynamo request pin cleared`. If the stream is dropped early, for example
 because the client closes the connection, the drop guard first emits

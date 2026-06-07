@@ -226,7 +226,19 @@ impl PrefillRouter {
                     .and_then(|v| v.as_u64())
                     .map(|r| r as u32);
                 Some((worker_id, dp_rank))
-            });
+            })
+            .or_else(|| tracker.as_ref().and_then(|tracker| tracker.get_worker_info()));
+
+        tracing::debug!(
+            worker_info = ?worker_info,
+            source = if disaggregated_params.get("worker_id").is_some() {
+                "disaggregated_params_or_tracker"
+            } else {
+                "tracker"
+            },
+            "Resolved completed-prefill worker metadata"
+        );
+
         Ok(PrefillCompletion {
             result: PrefillResult {
                 disaggregated_params,
