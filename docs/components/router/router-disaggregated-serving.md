@@ -88,3 +88,41 @@ graph TD
     linkStyle 0,1,2,3,4 stroke:#8b4513,stroke-width:2px
     linkStyle 5 stroke:#2196f3,stroke-width:2px
 ```
+
+## Request Pinning Proof Markers
+
+In disaggregated deployments that require deterministic request-level prefill
+to decode handoff, the frontend/router logs authoritative pin lifecycle markers.
+The markers are used by production smoke tests to distinguish a real pinned KV
+handoff from ordinary worker selection.
+
+For the bootstrap path, the router emits:
+
+```text
+dynamo disagg request pin established request_id=<id> prefill_worker_id=<worker> prefill_dp_rank=Some(<rank>) bootstrap_host=<host> bootstrap_port=<port>
+dynamo disagg request pin outbound to decode request_id=<id> bootstrap_host=<host> bootstrap_port=<port>
+```
+
+For the synchronous completed-prefill path, the router must still prove the same
+request affinity before decode. It emits the same marker names with
+`handoff_mode=completed_prefill` and a decode-consumable `ctx_info_endpoint`:
+
+```text
+dynamo disagg request pin established request_id=<id> disagg_request_id=<ctx-id> prefill_worker_id=<worker> prefill_dp_rank=<rank> ctx_info_endpoint=<endpoint> handoff_mode=completed_prefill
+dynamo disagg request pin outbound to decode request_id=<id> disagg_request_id=<ctx-id> ctx_info_endpoint=<endpoint> handoff_mode=completed_prefill
+```
+
+Completed-prefill handoff is fail-closed for the metadata required by those
+markers. If prefill does not return worker id, prefill DP rank, or a non-empty
+`ctx_info_endpoint`, the router refuses to route decode rather than allowing an
+unpinned KV receive. The decode request still receives the original
+`PrefillResult.disaggregated_params`; the markers are proof and audit metadata,
+not a replacement for the engine-owned transfer payload.
+
+Production gates should require all of the following for a pinned disaggregated
+request:
+
+- prefill and decode `dynamo request pin route selected` markers for the same
+  request id;
+- one `dynamo disagg request pin established` marker;
+- one `dynamo disagg request pin outbound to decode` marker;

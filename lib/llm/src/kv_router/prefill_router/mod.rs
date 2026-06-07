@@ -31,7 +31,10 @@ mod types;
 
 use inner::InnerPrefillRouter;
 pub use types::PrefillError;
-use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override};
+use types::{
+    PrefillOutcome, PrefillResolveDecision, build_decode_router_override,
+    completed_prefill_pin_metadata,
+};
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
@@ -212,6 +215,7 @@ impl
 
                 Ok(PrefillOutcome::Completed {
                     result: completion.result,
+                    worker_info: completion.worker_info,
                     worker_link: completion.worker_link,
                 })
             }
@@ -258,8 +262,28 @@ impl
                     }
                     PrefillOutcome::Completed {
                         result,
+                        worker_info,
                         worker_link,
                     } => {
+                        let pin = completed_prefill_pin_metadata(&result, worker_info, &request_id)?;
+
+                        tracing::info!(
+                            request_id = %request_id,
+                            disagg_request_id = %pin.disagg_request_id,
+                            prefill_worker_id = pin.prefill_worker_id,
+                            prefill_dp_rank = pin.prefill_dp_rank,
+                            ctx_info_endpoint = %pin.ctx_info_endpoint,
+                            handoff_mode = "completed_prefill",
+                            "dynamo disagg request pin established"
+                        );
+                        tracing::info!(
+                            request_id = %request_id,
+                            disagg_request_id = %pin.disagg_request_id,
+                            ctx_info_endpoint = %pin.ctx_info_endpoint,
+                            handoff_mode = "completed_prefill",
+                            "dynamo disagg request pin outbound to decode"
+                        );
+
                         decode_req.prefill_result = Some(result);
                         decode_req.migration_link = worker_link;
                     }
