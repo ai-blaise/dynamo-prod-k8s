@@ -19,11 +19,16 @@ if not torch.cuda.is_available():
     )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 
+from tensorrt_llm.disaggregated_params import DisaggScheduleStyle
+
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.llm_engine import TrtllmLLMEngine
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+from dynamo.trtllm.request_handlers.handler_base import (
+    TRTLLM_GEN_FIRST_PARAMS_KEY,
+    HandlerBase,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -638,6 +643,104 @@ class TestDisaggRequestId:
             request={}, ep_disaggregated_params=None
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id
+
+
+class TestGenerationFirstParams:
+    """Router-built generation-first params in _setup_disaggregated_params_for_mode."""
+
+    def _make_handler(
+        self, mode: DisaggregationMode = DisaggregationMode.PREFILL
+    ) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        config.disagg_machine_id = 42
+        handler = _ConcreteHandler(config)
+        handler.disaggregation_mode = mode
+        return handler
+
+    def _gen_first_request(self) -> dict:
+        return {
+            "token_ids": [1, 2, 3],
+            "extra_args": {
+                TRTLLM_GEN_FIRST_PARAMS_KEY: {
+                    "request_type": "context_only",
+                    "ctx_info_endpoint": "nixl://10.0.0.7:9300",
+                    "schedule_style": "generation_first",
+                    "disagg_request_id": 4242,
+                    "ctx_request_id": 4242,
+                    "ctx_dp_rank": 2,
+                }
+            },
+        }
+
+    def test_prefill_consumes_router_params(self):
+        handler = self._make_handler()
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request=self._gen_first_request(), ep_disaggregated_params=None
+        )
+        assert params.request_type == "context_only"
+        assert params.disagg_request_id == 4242
+        assert params.ctx_request_id == 4242
+        assert params.ctx_info_endpoint == "nixl://10.0.0.7:9300"
+        assert params.schedule_style == DisaggScheduleStyle.GENERATION_FIRST
+        assert params.ctx_dp_rank == 2
+
+    def test_prefill_collapses_endpoint_array(self):
+        handler = self._make_handler()
+        request = {
+            "extra_args": {
+                TRTLLM_GEN_FIRST_PARAMS_KEY: {
+                    "request_type": "context_only",
+                    "ctx_info_endpoint": ["", "nixl://a:1"],
+                    "schedule_style": "generation_first",
+                    "disagg_request_id": 7,
+                }
+            }
+        }
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request=request, ep_disaggregated_params=None
+        )
+        assert params.ctx_info_endpoint == "nixl://a:1"
+
+    def test_prefill_without_router_params_keeps_legacy_behavior(self):
+        handler = self._make_handler()
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={"extra_args": {"messages": []}}, ep_disaggregated_params=None
+        )
+        assert params.schedule_style is None
+        assert params.disagg_request_id is not None
+
+    def test_ep_params_take_precedence_over_router_params(self):
+        handler = self._make_handler()
+        ep_params = MagicMock()
+        ep_params.disagg_request_id = 99
+        ep_params.__bool__ = lambda self: True
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request=self._gen_first_request(), ep_disaggregated_params=ep_params
+        )
+        assert params is ep_params
+        assert params.request_type == "context_only"
+        assert params.disagg_request_id == 99
+
+    def test_decode_maps_schedule_style_from_prefill_result(self):
+        handler = self._make_handler(DisaggregationMode.DECODE)
+        request = {
+            "prefill_result": {
+                "disaggregated_params": {
+                    "request_type": "generation_only",
+                    "ctx_info_endpoint": "nixl://10.0.0.7:9300",
+                    "schedule_style": "generation_first",
+                    "disagg_request_id": 4242,
+                    "ctx_request_id": 4242,
+                }
+            }
+        }
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request=request, ep_disaggregated_params=None
+        )
+        assert params.request_type == "generation_only"
+        assert params.schedule_style == DisaggScheduleStyle.GENERATION_FIRST
+        assert params.disagg_request_id == 4242
 
 
 class TestHealthCheckPriority:

@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import torch
+from tensorrt_llm.disaggregated_params import DisaggScheduleStyle
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
@@ -60,6 +61,25 @@ if TYPE_CHECKING:
 configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
+
+# Runtime-data key for the router's generation-first handoff. Must match the
+# frontend PrefillRouter (lib/llm/src/kv_router/prefill_router/execution.rs)
+# and TrtllmLLMEngine on the unified path.
+TRTLLM_GEN_FIRST_PARAMS_KEY = "trtllm_generation_first_disaggregated_params"
+
+
+def _coerce_schedule_style(params_dict: dict) -> None:
+    """Map wire-format schedule_style onto TRT-LLM's enum, in place.
+
+    The frontend serializes schedule_style as a string (or the enum's int);
+    ``DisaggregatedParams(**params_dict)`` would otherwise carry the raw
+    string into the engine.
+    """
+    style = params_dict.get("schedule_style")
+    if style in ("generation_first", 1):
+        params_dict["schedule_style"] = DisaggScheduleStyle.GENERATION_FIRST
+    elif style in ("context_first", 0):
+        params_dict["schedule_style"] = DisaggScheduleStyle.CONTEXT_FIRST
 
 
 class TRTLLMEngineQuiesceController:
@@ -518,6 +538,30 @@ class HandlerBase(BaseGenerativeHandler):
                 # Cancellation triggered - propagate any exceptions
                 monitor_task.result()
 
+    @staticmethod
+    def _request_disaggregated_params(request: dict) -> Optional[Any]:
+        """Router-built generation-first params from the request, if any.
+
+        The frontend PrefillRouter attaches
+        ``extra_args["trtllm_generation_first_disaggregated_params"]`` to
+        context_only requests when this worker published a NIXL
+        ctx_info_endpoint at registration (write-mode handoff). Mirrors
+        TrtllmLLMEngine._request_disaggregated_params on the unified path.
+        """
+        extra_args = request.get("extra_args") or {}
+        if not isinstance(extra_args, dict):
+            return None
+        params_dict = extra_args.get(TRTLLM_GEN_FIRST_PARAMS_KEY)
+        if not params_dict:
+            return None
+        params_dict = dict(params_dict)
+        endpoint = params_dict.get("ctx_info_endpoint")
+        if isinstance(endpoint, list):
+            params_dict["ctx_info_endpoint"] = next((x for x in endpoint if x), None)
+        _coerce_schedule_style(params_dict)
+        DisaggregatedParamsCodec.deserialize_first_gen_log_probs(params_dict)
+        return DisaggregatedParamsCodec.decode(DisaggregatedParams(**params_dict))
+
     def _decode_disaggregated_params_from_prefill(
         self, prefill_result: dict
     ) -> tuple[Any, dict]:
@@ -550,6 +594,7 @@ class HandlerBase(BaseGenerativeHandler):
             )
 
         # Decode the disaggregated params
+        _coerce_schedule_style(params_dict)
         disaggregated_params = DisaggregatedParamsCodec.decode(
             DisaggregatedParams(**params_dict)
         )
@@ -705,9 +750,22 @@ class HandlerBase(BaseGenerativeHandler):
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            request_params = self._request_disaggregated_params(request)
             if ep_disaggregated_params:
+                if request_params is not None:
+                    logging.warning(
+                        "Router generation-first params ignored: encode-worker "
+                        "(EPD) disaggregated params take precedence; decode "
+                        "was dispatched with a router-minted disagg_request_id "
+                        "this prefill will not use"
+                    )
                 ep_disaggregated_params.request_type = "context_only"
                 disaggregated_params = ep_disaggregated_params
+            elif request_params is not None:
+                # Router-built generation-first params: shared
+                # disagg_request_id with the concurrently-dispatched decode.
+                request_params.request_type = "context_only"
+                disaggregated_params = request_params
             else:
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only",

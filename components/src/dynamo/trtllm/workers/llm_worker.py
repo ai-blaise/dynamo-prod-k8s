@@ -130,6 +130,47 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
             setattr(config, field_name, engine_args[field_name])
 
 
+# Runtime-data key for the router's generation-first handoff. Must match the
+# frontend PrefillRouter (lib/llm/src/kv_router/prefill_router/execution.rs)
+# and TrtllmLLMEngine on the unified path.
+TRTLLM_GEN_FIRST_PARAMS_KEY = "trtllm_generation_first_disaggregated_params"
+
+
+def _generation_first_runtime_params(engine) -> Optional[dict]:
+    """Static TRT-LLM/NIXL generation-first metadata for runtime_data.
+
+    The Python/native NIXL transceiver exposes its context endpoint before any
+    request runs. The frontend uses it to route decode concurrently with
+    prefill (write-mode handoff, schedule_style=generation_first). Returns
+    None when the engine publishes no endpoint; the router then falls back to
+    the serialized completed-prefill handoff. Mirrors
+    TrtllmLLMEngine._runtime_disaggregated_params on the unified path.
+    """
+    try:
+        params = dict(engine.llm.disaggregated_params or {})
+    except Exception as e:
+        logging.warning("Unable to read TRT-LLM disaggregated_params: %s", e)
+        return None
+
+    endpoint = params.get("ctx_info_endpoint")
+    if isinstance(endpoint, list):
+        endpoint = next((x for x in endpoint if x), None)
+    if not endpoint:
+        logging.info(
+            "TRT-LLM did not publish ctx_info_endpoint; generation-first "
+            "NIXL routing will fall back to completed-prefill handoff"
+        )
+        return None
+
+    runtime_params = {
+        "ctx_info_endpoint": endpoint,
+        "schedule_style": "generation_first",
+    }
+    if params.get("ctx_dp_rank") is not None:
+        runtime_params["ctx_dp_rank"] = params["ctx_dp_rank"]
+    return runtime_params
+
+
 def _register_memory_routes(runtime, handler) -> None:
     runtime.register_engine_route(
         "release_memory_occupation",
@@ -507,6 +548,20 @@ async def init_llm_worker(
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
         attention_dp_size = engine.get_attention_dp_size()
         runtime_config.data_parallel_size = attention_dp_size
+
+        # Prefill workers publish their NIXL context endpoint so the frontend
+        # PrefillRouter can dispatch decode concurrently with prefill instead
+        # of serializing on the completed-prefill response.
+        if config.disaggregation_mode == DisaggregationMode.PREFILL:
+            gen_first_params = _generation_first_runtime_params(engine)
+            if gen_first_params is not None:
+                runtime_config.set_engine_specific(
+                    TRTLLM_GEN_FIRST_PARAMS_KEY, json.dumps(gen_first_params)
+                )
+                logging.info(
+                    "Publishing TRT-LLM generation-first NIXL endpoint for "
+                    "request pinning"
+                )
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(

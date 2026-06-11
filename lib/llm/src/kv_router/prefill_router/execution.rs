@@ -444,6 +444,82 @@ mod tests {
 
     const MAX_ROOM: u64 = i64::MAX as u64;
 
+    // -- TRT-LLM generation-first param construction --
+
+    #[test]
+    fn gen_first_params_split_request_types_and_share_request_id() {
+        let runtime = json!({"ctx_info_endpoint": "nixl://10.0.0.7:9300"});
+        let (prefill, decode) =
+            build_trtllm_generation_first_params(runtime, Some(2), 4242).expect("params");
+
+        assert_eq!(prefill["request_type"], json!("context_only"));
+        assert_eq!(decode["request_type"], json!("generation_only"));
+        for params in [&prefill, &decode] {
+            assert_eq!(params["ctx_info_endpoint"], json!("nixl://10.0.0.7:9300"));
+            assert_eq!(params["schedule_style"], json!("generation_first"));
+            assert_eq!(params["disagg_request_id"].as_u64(), Some(4242));
+            assert_eq!(params["ctx_request_id"].as_u64(), Some(4242));
+            assert_eq!(params["ctx_dp_rank"].as_u64(), Some(2));
+        }
+    }
+
+    #[test]
+    fn gen_first_params_pick_first_nonempty_endpoint_from_array() {
+        let runtime = json!({"ctx_info_endpoint": ["", "nixl://a:1", "nixl://b:2"]});
+        let (prefill, decode) =
+            build_trtllm_generation_first_params(runtime, None, 7).expect("params");
+        assert_eq!(prefill["ctx_info_endpoint"], json!("nixl://a:1"));
+        assert_eq!(decode["ctx_info_endpoint"], json!("nixl://a:1"));
+    }
+
+    #[test]
+    fn gen_first_params_reject_missing_or_empty_endpoint() {
+        for runtime in [
+            json!({}),
+            json!({"ctx_info_endpoint": ""}),
+            json!({"ctx_info_endpoint": []}),
+            json!({"ctx_info_endpoint": ["", ""]}),
+            json!({"ctx_info_endpoint": null}),
+            json!("not-an-object"),
+        ] {
+            assert!(
+                build_trtllm_generation_first_params(runtime.clone(), Some(0), 1).is_none(),
+                "expected None for runtime metadata {runtime}",
+            );
+        }
+    }
+
+    #[test]
+    fn gen_first_params_dp_rank_insert_and_null_strip() {
+        // Router-resolved dp_rank wins over published metadata.
+        let runtime = json!({"ctx_info_endpoint": "nixl://a:1", "ctx_dp_rank": 9});
+        let (prefill, _) =
+            build_trtllm_generation_first_params(runtime, Some(3), 1).expect("params");
+        assert_eq!(prefill["ctx_dp_rank"].as_u64(), Some(3));
+
+        // Null published rank without a router rank is stripped, not forwarded.
+        let runtime = json!({"ctx_info_endpoint": "nixl://a:1", "ctx_dp_rank": null});
+        let (prefill, decode) =
+            build_trtllm_generation_first_params(runtime, None, 1).expect("params");
+        assert!(!prefill.as_object().unwrap().contains_key("ctx_dp_rank"));
+        assert!(!decode.as_object().unwrap().contains_key("ctx_dp_rank"));
+
+        // Numeric published rank without a router rank is preserved.
+        let runtime = json!({"ctx_info_endpoint": "nixl://a:1", "ctx_dp_rank": 5});
+        let (prefill, _) = build_trtllm_generation_first_params(runtime, None, 1).expect("params");
+        assert_eq!(prefill["ctx_dp_rank"].as_u64(), Some(5));
+    }
+
+    #[test]
+    fn gen_first_params_accept_63bit_request_id_cap() {
+        // The caller mints ids in [0, i64::MAX] (same contract as bootstrap_room).
+        let runtime = json!({"ctx_info_endpoint": "nixl://a:1"});
+        let (_, decode) =
+            build_trtllm_generation_first_params(runtime, None, MAX_ROOM).expect("params");
+        assert_eq!(decode["disagg_request_id"].as_u64(), Some(MAX_ROOM));
+        assert_eq!(decode["ctx_request_id"].as_u64(), Some(MAX_ROOM));
+    }
+
     #[test]
     fn bootstrap_room_falls_back_when_dp_unavailable() {
         // Missing rank, missing size, or both -> return r unchanged.

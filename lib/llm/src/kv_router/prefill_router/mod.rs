@@ -322,6 +322,14 @@ impl
                         result,
                         worker_link,
                     } => {
+                        // Serialized read-mode handoff: decode dispatched only after
+                        // the full prefill response. The campaign audit greps this
+                        // marker to fail-close on silent generation-first fallback.
+                        tracing::info!(
+                            request_id = %request_id,
+                            handoff_mode = "completed_prefill",
+                            "dynamo disagg request pin outbound to decode"
+                        );
                         decode_req.prefill_result = Some(result);
                         decode_req.migration_link = worker_link;
                     }
