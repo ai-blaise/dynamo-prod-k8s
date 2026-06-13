@@ -66,6 +66,11 @@ def _optrt_r20_envs(service_name: str) -> dict[str, str]:
     return {item["name"]: item["value"] for item in services[service_name]["envs"]}
 
 
+def _optrt_r20_args(service_name: str) -> list[str]:
+    services = _optrt_r20_dgd()["spec"]["services"]
+    return services[service_name]["extraPodSpec"]["mainContainer"]["args"]
+
+
 def _service_for(service_name: str) -> dict:
     return _manifest()["spec"]["services"][service_name]
 
@@ -193,6 +198,8 @@ def test_optrt_r20_manifest_keeps_optimized_custom_stack_default():
     decode = _optrt_r20_engine_config("decode.yaml")
     prefill_env = _optrt_r20_envs("prefill")
     decode_env = _optrt_r20_envs("decode")
+    prefill_args = _optrt_r20_args("prefill")
+    decode_args = _optrt_r20_args("decode")
 
     for cfg in (prefill, decode):
         transceiver = cfg["cache_transceiver_config"]
@@ -205,10 +212,21 @@ def test_optrt_r20_manifest_keeps_optimized_custom_stack_default():
         assert cfg["moe_config"]["backend"] == "WARPDECODE"
 
     for envs in (prefill_env, decode_env):
+        # This is the NIXL plugin backend. The direct UCX transceiver remains
+        # banned by cache_transceiver_config.backend=NIXL above.
         assert envs["TRTLLM_NIXL_KVCACHE_BACKEND"] == "UCX"
         assert envs["TRTLLM_NIXL_ENABLE_COALESCE"] == "1"
         assert envs["TRTLLM_DISABLE_KV_CACHE_TRANSFER_OVERLAP"] == "0"
         assert envs["TRTLLM_ENABLE_KVCACHE_RECEIVE_PARALLEL"] == "1"
+        assert "TRTLLM_USE_UCX_KVCACHE" not in envs
+        assert "TRTLLM_USE_MOONCAKE_KVCACHE" not in envs
+        assert "TRTLLM_USE_MPI_KVCACHE" not in envs
+
+    for args in (prefill_args, decode_args):
+        # TRT-LLM's Dynamo runtime connector supports only "none" or "kvbm".
+        # NIXL is selected by cache_transceiver_config, so --connector must not
+        # be rewritten to an unsupported "--connector nixl" value.
+        assert _arg_value(args, "--connector") == "none"
 
     prefill_sparse = prefill["sparse_attention_config"]
     assert prefill["context_parallel_size"] == 2

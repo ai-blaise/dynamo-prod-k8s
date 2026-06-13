@@ -291,6 +291,12 @@ spec:
       - name: UCX_CUDA_IPC_ENABLE_MNNVL
         value: '0'
       - name: TRTLLM_NIXL_KVCACHE_BACKEND
+        # TRT-LLM selects the Python NIXL transceiver from
+        # cache_transceiver_config.backend=NIXL above. This value selects the
+        # NIXL plugin backend, not the legacy/direct UCX cache transceiver.
+        # On the current single-node GCP B200 r20 lane, LIBFABRIC can load but
+        # does not expose a working HMEM path, so UCX is the proven NIXL plugin
+        # gate and LIBFABRIC remains an A/B candidate.
         value: UCX
       - name: TRTLLM_NIXL_ENABLE_COALESCE
         value: '1'
@@ -476,6 +482,12 @@ spec:
       - name: UCX_CUDA_IPC_ENABLE_MNNVL
         value: '0'
       - name: TRTLLM_NIXL_KVCACHE_BACKEND
+        # TRT-LLM selects the Python NIXL transceiver from
+        # cache_transceiver_config.backend=NIXL above. This value selects the
+        # NIXL plugin backend, not the legacy/direct UCX cache transceiver.
+        # On the current single-node GCP B200 r20 lane, LIBFABRIC can load but
+        # does not expose a working HMEM path, so UCX is the proven NIXL plugin
+        # gate and LIBFABRIC remains an A/B candidate.
         value: UCX
       - name: TRTLLM_NIXL_ENABLE_COALESCE
         value: '1'
