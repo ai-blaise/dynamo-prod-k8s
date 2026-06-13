@@ -12,6 +12,13 @@ MANIFEST = (
     / "examples"
     / "deepseek-v32-reap-sglang.yaml"
 )
+OPTRT_R20_MANIFEST = (
+    Path(__file__).resolve().parents[2]
+    / "deploy"
+    / "production"
+    / "examples"
+    / "deepseek-v32-nextn-optrt-r20.yaml"
+)
 FRONTEND_ARGS = (
     Path(__file__).resolve().parents[2]
     / "components"
@@ -36,6 +43,27 @@ TARGET_MODEL = (
 
 def _manifest() -> dict:
     return yaml.safe_load(MANIFEST.read_text())
+
+
+def _optrt_r20_docs() -> list[dict]:
+    return list(yaml.safe_load_all(OPTRT_R20_MANIFEST.read_text()))
+
+
+def _optrt_r20_configmap() -> dict:
+    return next(doc for doc in _optrt_r20_docs() if doc["kind"] == "ConfigMap")
+
+
+def _optrt_r20_dgd() -> dict:
+    return next(doc for doc in _optrt_r20_docs() if doc["kind"] == "DynamoGraphDeployment")
+
+
+def _optrt_r20_engine_config(name: str) -> dict:
+    return yaml.safe_load(_optrt_r20_configmap()["data"][name])
+
+
+def _optrt_r20_envs(service_name: str) -> dict[str, str]:
+    services = _optrt_r20_dgd()["spec"]["services"]
+    return {item["name"]: item["value"] for item in services[service_name]["envs"]}
 
 
 def _service_for(service_name: str) -> dict:
@@ -158,3 +186,55 @@ def test_deepseek_reap_smc_is_decode_only():
     assert _arg_value(decode_args, "--smc-draft-kv-cache-dtype") == "fp8_e4m3"
     assert _arg_value(decode_args, "--smc-n-particles") == "4"
     assert _arg_value(decode_args, "--smc-gamma") == "6"
+
+
+def test_optrt_r20_manifest_keeps_optimized_custom_stack_default():
+    prefill = _optrt_r20_engine_config("prefill.yaml")
+    decode = _optrt_r20_engine_config("decode.yaml")
+    prefill_env = _optrt_r20_envs("prefill")
+    decode_env = _optrt_r20_envs("decode")
+
+    for cfg in (prefill, decode):
+        transceiver = cfg["cache_transceiver_config"]
+        assert transceiver["backend"] == "NIXL"
+        assert transceiver["transceiver_runtime"] == "PYTHON"
+        assert transceiver["max_tokens_in_buffer"] == 131072
+        assert cfg["sparse_attention_config"]["mla_latent_kv_dtype"] == "kvarn_k2v2"
+        assert cfg["sparse_attention_config"]["mla_latent_kv_amortize"] is True
+        assert cfg["sparse_attention_config"]["indexer_k_dtype"] == "fp4"
+        assert cfg["moe_config"]["backend"] == "WARPDECODE"
+
+    for envs in (prefill_env, decode_env):
+        assert envs["TRTLLM_NIXL_KVCACHE_BACKEND"] == "UCX"
+        assert envs["TRTLLM_NIXL_ENABLE_COALESCE"] == "1"
+        assert envs["TRTLLM_DISABLE_KV_CACHE_TRANSFER_OVERLAP"] == "0"
+        assert envs["TRTLLM_ENABLE_KVCACHE_RECEIVE_PARALLEL"] == "1"
+
+    prefill_sparse = prefill["sparse_attention_config"]
+    assert prefill["context_parallel_size"] == 2
+    assert prefill["cp_config"]["cp_type"] == "LAYERSPLIT"
+    assert prefill_sparse["layersplit_enabled"] is True
+    assert prefill_sparse["layersplit_transfer_backend"] == "nixl"
+    assert prefill_sparse["layersplit_all_cp_ranks_transfer"] is True
+    assert prefill_sparse["layersplit_owner_local_alloc"] is True
+    assert prefill_env["TRTLLM_FORCE_COMM_METHOD"] == "NVLINK_TWO_SIDED"
+
+    assert decode["context_parallel_size"] == 1
+    assert decode["enable_attention_dp"] is True
+    assert decode["sparse_attention_config"]["layersplit_enabled"] is False
+    assert decode["moe_config"]["use_low_precision_moe_combine"] is False
+    assert decode["moe_config"]["warp_decode"]["enabled"] is True
+    assert decode["moe_config"]["warp_decode"]["policy"] == "force"
+    assert decode["moe_config"]["warp_decode"]["allow_parallelism_fallback"] is False
+    assert decode_env["TRTLLM_FORCE_COMM_METHOD"] == "DEEPEPLOWLATENCY"
+    assert decode_env["TRTLLM_DEEP_EP_TOKEN_LIMIT"] == "64"
+    assert decode_env["TRTLLM_DEEP_EP_DISABLE_P2P_FOR_LOW_LATENCY_MODE"] == "0"
+    assert decode_env["TRTLLM_MOE_POST_QUANT_ALLTOALLV"] == "1"
+
+    smc = decode["speculative_config"]
+    assert smc["decoding_type"] == "SMC"
+    assert smc["speculative_model"] == "/models/BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP"
+    assert smc["gamma"] == 6
+    assert smc["n_particles"] == 4
+    assert smc["draft_attention_backend"] == "triton"
+    assert smc["draft_kv_cache_dtype"] == "bfloat16"
