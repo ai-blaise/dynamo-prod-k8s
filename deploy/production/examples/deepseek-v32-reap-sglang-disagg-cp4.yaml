@@ -78,7 +78,7 @@ spec:
         volumes:
           - name: deepseek-v32-reap-model
             hostPath:
-              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
               type: Directory
         mainContainer:
           image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
@@ -100,7 +100,7 @@ spec:
             - "8000"
           volumeMounts:
             - name: deepseek-v32-reap-model
-              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
               readOnly: true
           env:
             - name: POD_UID
@@ -134,7 +134,7 @@ spec:
         volumes:
           - name: deepseek-v32-reap-model
             hostPath:
-              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
               type: Directory
         mainContainer:
           image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
@@ -146,9 +146,9 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
             - --served-model-name
-            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
             - --host
             - 0.0.0.0
             - --trust-remote-code
@@ -217,7 +217,7 @@ spec:
             failureThreshold: 360
           volumeMounts:
             - name: deepseek-v32-reap-model
-              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
               readOnly: true
     decode:
       componentType: worker
@@ -239,7 +239,7 @@ spec:
         volumes:
           - name: deepseek-v32-reap-model
             hostPath:
-              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
               type: Directory
           - name: smcsd-draft-model
             hostPath:
@@ -255,9 +255,9 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
             - --served-model-name
-            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
             - --host
             - 0.0.0.0
             - --trust-remote-code
@@ -347,7 +347,7 @@ spec:
             failureThreshold: 360
           volumeMounts:
             - name: deepseek-v32-reap-model
-              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
               readOnly: true
             - name: smcsd-draft-model
               mountPath: /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP

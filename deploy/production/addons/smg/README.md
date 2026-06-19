@@ -69,7 +69,7 @@ kubectl -n smg port-forward svc/smg-router 8080:80
 curl -sS http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4",
+    "model": "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft",
     "messages": [{"role": "user", "content": "Reply with exactly: pong"}],
     "max_tokens": 8
   }'

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek REAP SGLang
 
-This runbook validates `BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4` on the Dynamo production Kubernetes profile with the SGLang backend from `ai-blaise/optimization-playground`.
+This runbook validates `BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft` on the Dynamo production Kubernetes profile with the SGLang backend from `ai-blaise/optimization-playground`.
 
 The active topology runs on one A4 node with eight allocatable B200 GPUs: one
 4-GPU prefill worker and two 2-GPU decode replicas. The production profile uses
@@ -75,7 +75,7 @@ The GitOps manifests read from `https://github.com/ai-blaise/dynamo-prod-k8s.git
 Run the download on every node that can schedule the worker pod. The default manifest mounts the model from:
 
 ```text
-/models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+/models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
 ```
 
 and the SMC draft from:
@@ -99,8 +99,8 @@ python -m pip install --upgrade pip
 python -m pip install "huggingface_hub[hf_xet]>=0.36"
 
 hf download \
-  BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4 \
-  --local-dir /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+  BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft \
+  --local-dir /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
 
 hf download \
   BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP \
@@ -196,8 +196,8 @@ The workers launch SGLang through Dynamo with the core stack enabled:
 
 ```bash
 python3 -m dynamo.sglang \
-  --model-path /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4 \
-  --served-model-name BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4 \
+  --model-path /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft \
+  --served-model-name BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft \
   --quantization compressed-tensors \
   --kv-cache-dtype bfloat16 \
   --tp 4|2 \
@@ -249,7 +249,7 @@ kubectl port-forward -n dynamo-system svc/deepseek-v32-reap-sglang-frontend 8000
 curl -sS http://127.0.0.1:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
-    "model": "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4",
+    "model": "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft",
     "messages": [{"role": "user", "content": "Say: dynamo-ready"}],
     "temperature": 0,
     "max_tokens": 64

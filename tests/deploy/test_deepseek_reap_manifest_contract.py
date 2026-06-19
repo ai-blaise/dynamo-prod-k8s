@@ -37,7 +37,7 @@ FRONTEND_MAIN = (
 )
 MODEL_CARD = Path(__file__).resolve().parents[2] / "lib" / "llm" / "src" / "model_card.rs"
 TARGET_MODEL = (
-    "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4"
+    "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft"
 )
 
 

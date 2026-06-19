@@ -35,7 +35,7 @@ router:
 
   # Model identity surfaced to clients via /v1/models. Keep this aligned with
   # --served-model-name in deploy/production/examples/deepseek-v32-reap-sglang.yaml.
-  model: BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4
+  model: BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft
 
   maxPayloadSize: 536870912
   requestTimeoutSecs: 1800
