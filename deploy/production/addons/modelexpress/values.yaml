@@ -24,8 +24,10 @@ serviceAccount:
   rbac:
     enabled: true
 
-podSecurityContext: {}
-securityContext: {}
+podSecurityContext:
+  runAsNonRoot: false
+securityContext:
+  runAsNonRoot: false
 
 service:
   type: ClusterIP
