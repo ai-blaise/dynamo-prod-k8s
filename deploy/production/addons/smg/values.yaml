@@ -14,9 +14,9 @@
 
 global:
   image:
-    registry: docker.io
-    repository: lightseekorg/smg
-    tag: "1.4.1"
+    registry: ghcr.io
+    repository: spencergarnets/smg
+    tag: "bumkc-v1.4.1-dynamo-compat-5843658"
     pullPolicy: IfNotPresent
 
 router:

@@ -49,7 +49,7 @@ Each add-on under [`addons/`](addons/) has an individual README that records its
 | KAI Scheduler | `ghcr.io/kai-scheduler/kai-scheduler` | `v0.14.0` |
 | Grove | `ghcr.io/ai-dynamo/grove` | `v0.1.0-alpha.8` |
 | ModelExpress | `https://github.com/ai-dynamo/modelexpress.git` | `0.3.0` at `9fd703e` |
-| SMG | `https://github.com/lightseekorg/smg.git` | `v1.4.1` |
+| SMG | `https://github.com/lightseekorg/smg.git` | Chart `v1.4.1`, router image `ghcr.io/spencergarnets/smg:bumkc-v1.4.1-dynamo-compat-5843658` |
 | Dynamo PrometheusRules | Repository manifests | `main` |
 
 ## Optional Add-ons

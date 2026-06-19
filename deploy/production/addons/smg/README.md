@@ -55,7 +55,7 @@ Renovate at [`.github/renovate.json5`](../../../../.github/renovate.json5) handl
 | Patch and minor | Renovate opens a PR and auto-merges after CI. |
 | Major | Renovate opens a PR with `needs-human-review` label. |
 
-To bump SMG manually outside Renovate, edit `targetRevision` in `gitops/apps/70-smg.yaml` and the matching image `tag:` in this `values.yaml` together.
+To bump SMG manually outside Renovate, edit `targetRevision` in `gitops/apps/70-smg.yaml` when the chart changes, and edit the matching image `registry:`, `repository:`, and `tag:` in this `values.yaml` when the router image changes.
 
 ## Auth
 
