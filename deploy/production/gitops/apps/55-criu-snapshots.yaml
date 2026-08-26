@@ -17,7 +17,9 @@ spec:
   project: dynamo-production
   sources:
     - repoURL: https://github.com/ai-blaise/criu-snapshots.git
-      targetRevision: main
+      # Pinned to the release tag so chart and image versions move in
+      # lockstep through PRs here, never implicitly via upstream main.
+      targetRevision: v0.2.0
       path: chart
       helm:
         releaseName: criu-snapshots
