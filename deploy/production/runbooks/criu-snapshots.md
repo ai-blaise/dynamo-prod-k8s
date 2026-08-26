@@ -80,14 +80,15 @@ scripts/dynamo-reap/deploy-a4-snapshots.sh
 Watch progress:
 
 ```bash
-kubectl -n criu-snapshots get dgds -w
-kubectl -n criu-snapshots describe dgds <name>
+kubectl -n <workload namespace> get workloadsnapshots -w
+kubectl -n <workload namespace> describe workloadsnapshot <name>
 kubectl -n criu-snapshots logs -l app.kubernetes.io/component=controller --tail=100
 kubectl -n criu-snapshots logs -l app.kubernetes.io/component=daemon --field-selector=spec.nodeName=<node> --tail=100
 ```
 
-Expected phase progression: `Pending` → `Snapshotting` → `Packaging` →
-`Pushing` → `Validating` → `Ready`. Total wall time on the
+Expected phase progression: `Pending` → `Quiescing` → `Dumping` →
+`Publishing` → `Resuming` → `Ready` (v2 group protocol; the barrier
+holds every rank quiesced before the first dump). Total wall time on the
 `deepseek-v32-reap-sglang` deployment runs ~30-90 s per rank depending
 on which scratch buffers and cached graphs are resident.
 

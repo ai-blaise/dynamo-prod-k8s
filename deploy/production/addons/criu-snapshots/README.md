@@ -6,11 +6,14 @@ SPDX-License-Identifier: Apache-2.0
 # criu-snapshots — Production Addon
 
 Drop-in installer for the [ai-blaise/criu-snapshots](https://github.com/ai-blaise/criu-snapshots)
-controller, per-node snapshot-agent DaemonSet, and the two CRDs
-(`DynamoGraphDeploymentSnapshot`, `MegatronTrainingSnapshot`). Gives Dynamo
-+ SGLang workers and Megatron-LM training jobs CRIU + `cuda-checkpoint`
-snapshot/restore so a fresh replica can resume from a cold-cached snapshot
-in seconds instead of minutes.
+v2 control plane: controller, per-node snapshot-agent DaemonSet, and
+the v1alpha2 CRDs (`SnapshotProfile`, `WorkloadSnapshot`,
+`WorkloadRestore`). Gives Dynamo + SGLang workers and Megatron-LM
+training jobs coordinated CRIU + `cuda-checkpoint` group
+snapshot/restore so a fresh replica set can resume from a cold-cached
+snapshot in seconds instead of minutes. Built-in profiles
+`dynamo-sglang` and `megatron-lm` install with the chart; a snapshot
+is one `WorkloadSnapshot` CR naming the workload and profile.
 
 The full constraint list and operational rules live in
 [`../../runbooks/criu-snapshots.md`](../../runbooks/criu-snapshots.md). Read
@@ -20,8 +23,8 @@ that before flipping `snapshots.ai-blaise.io/enabled: "true"` on any DGD.
 
 | Capability                              | Where                                   | Knob                                                |
 | --------------------------------------- | --------------------------------------- | --------------------------------------------------- |
-| `DynamoGraphDeploymentSnapshot` CRD     | `chart/crds/` of upstream repo          | `installCRDs: true`                                 |
-| `MegatronTrainingSnapshot` CRD          | `chart/crds/` of upstream repo          | `installCRDs: true`                                 |
+| `SnapshotProfile` / `WorkloadSnapshot` / `WorkloadRestore` CRDs | `chart/crds/` of upstream repo | `installCRDs: true` |
+| Built-in profiles `dynamo-sglang`, `megatron-lm` | `chart/profiles/` of upstream repo | `profiles.include` |
 | Controller Deployment                   | namespace `criu-snapshots`              | `controller.replicas`                               |
 | Per-node DaemonSet (drops criu, plugins, cuda-checkpoint onto `/opt/criu-snapshots/`) | every GPU node | `daemon.nodeSelector`                               |
 | OCI snapshot artifacts                  | `ghcr.io/ai-blaise/dynamo-snapshots`    | `ghcr.pushSecretName`, `ghcr.pullSecretName`        |
@@ -39,9 +42,9 @@ that before flipping `snapshots.ai-blaise.io/enabled: "true"` on any DGD.
   `addons/external-secrets/` is responsible for materialising
   `ghcr-pull` and `ghcr-push` secrets in the `criu-snapshots`
   namespace from the org's secret vault.
-- Take snapshots automatically. A `DynamoGraphDeploymentSnapshot` is
-  always created explicitly (manual `kubectl apply`, the
-  `deploy-a4-snapshots.sh` wrapper, or a future scheduled CronJob).
+- Take snapshots automatically. A `WorkloadSnapshot` is always created
+  explicitly (manual `kubectl apply`, the `deploy-a4-snapshots.sh`
+  wrapper, or a future scheduled CronJob).
 - Provide a cold-start fallback. Per the runbook, failed restores
   surface as Pod failures; the Dynamo KV router routes around the
   degraded replica and the alert fires.
@@ -83,9 +86,11 @@ To bump manually:
 
 ```bash
 kubectl -n criu-snapshots get pods
-kubectl get crd dynamographdeploymentsnapshots.snapshots.ai-blaise.io
-kubectl get crd megatrontrainingsnapshots.snapshots.ai-blaise.io
-kubectl get dgds,mts -A
+kubectl get crd snapshotprofiles.snapshots.ai-blaise.io
+kubectl get crd workloadsnapshots.snapshots.ai-blaise.io
+kubectl get crd workloadrestores.snapshots.ai-blaise.io
+kubectl get snapshotprofile
+kubectl get workloadsnapshots,workloadrestores -A
 ```
 
 Take a no-op snapshot of an existing DGD to confirm the take path:
