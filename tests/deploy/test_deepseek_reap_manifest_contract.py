@@ -4,7 +4,6 @@ from pathlib import Path
 
 import yaml
 
-
 MANIFEST = (
     Path(__file__).resolve().parents[2]
     / "deploy"
@@ -35,10 +34,10 @@ FRONTEND_MAIN = (
     / "frontend"
     / "main.py"
 )
-MODEL_CARD = Path(__file__).resolve().parents[2] / "lib" / "llm" / "src" / "model_card.rs"
-TARGET_MODEL = (
-    "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft"
+MODEL_CARD = (
+    Path(__file__).resolve().parents[2] / "lib" / "llm" / "src" / "model_card.rs"
 )
+TARGET_MODEL = "BlaiseAI/DeepSeek-V3.2-REAP-345B-SpinQuant-ActKV-NVFP4-NextN-Graft"
 
 
 def _manifest() -> dict:
@@ -54,7 +53,9 @@ def _optrt_r20_configmap() -> dict:
 
 
 def _optrt_r20_dgd() -> dict:
-    return next(doc for doc in _optrt_r20_docs() if doc["kind"] == "DynamoGraphDeployment")
+    return next(
+        doc for doc in _optrt_r20_docs() if doc["kind"] == "DynamoGraphDeployment"
+    )
 
 
 def _optrt_r20_engine_config(name: str) -> dict:
@@ -251,7 +252,9 @@ def test_optrt_r20_manifest_keeps_optimized_custom_stack_default():
 
     smc = decode["speculative_config"]
     assert smc["decoding_type"] == "SMC"
-    assert smc["speculative_model"] == "/models/BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP"
+    assert (
+        smc["speculative_model"] == "/models/BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP"
+    )
     assert smc["gamma"] == 6
     assert smc["n_particles"] == 4
     assert smc["draft_attention_backend"] == "triton"

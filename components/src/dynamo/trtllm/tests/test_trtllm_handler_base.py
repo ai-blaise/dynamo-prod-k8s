@@ -17,9 +17,8 @@ if not torch.cuda.is_available():
         "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
         allow_module_level=True,
     )
-from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
-
 from tensorrt_llm.disaggregated_params import DisaggScheduleStyle
+from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
