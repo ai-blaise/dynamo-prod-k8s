@@ -8,6 +8,10 @@ on:
       - synchronize
       - reopened
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   conventional-commits:
     name: Validate PR title and add label

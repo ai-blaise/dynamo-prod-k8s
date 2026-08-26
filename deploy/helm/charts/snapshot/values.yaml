@@ -19,9 +19,25 @@
 
 # Container runtime backend. Leave socketPath empty to use the conventional
 # path for the chosen type.
+#
+# socketPath is the **host** path of the runtime's CRI socket. The chart
+# bind-mounts the directory containing it into the agent container at the
+# runtime's conventional in-container path (/run/containerd for containerd,
+# /var/run/crio for crio), so non-default host layouts work without forking
+# the agent image. Typical overrides:
+#
+#   k3s:              /run/k3s/containerd/containerd.sock
+#   RKE2:             /run/k3s-containerd/containerd.sock
+#   CRI-O on RHCOS:   /run/crio/crio.sock  (matches the default; leave blank)
+#
+# storageDir is the host path that holds the per-container overlay upperdirs
+# the agent reads for rootfs-diff capture. Defaults to /var/lib/containerd
+# (containerd) or /var/lib/containers (crio); k3s and RKE2 put this under
+# /var/lib/rancher/k3s/agent/containerd and need to override.
 runtime:
   type: containerd  # containerd | crio
   socketPath: ""
+  storageDir: ""
 
 # Gates the OCP RBAC template and the DS required-scc annotation. Keep false
 # on vanilla Kubernetes (it references an OCP-only built-in SCC).

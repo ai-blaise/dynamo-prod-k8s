@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# dynamo-snapshot: upstream NVIDIA Dynamo Snapshot agent + PVC. Runs alongside
+# the operator-driven DGDS path from ai-blaise/criu-snapshots (55-criu-snapshots).
+# See addons/dynamo-snapshot/ and runbooks/dynamo-snapshot.md for the full
+# contract. Sync wave 56: after criu-snapshots so both CRDs/CRs are present
+# before any workload-level snapshot annotation gets written.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dynamo-snapshot
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "56"
+spec:
+  project: dynamo-production
+  sources:
+    - repoURL: https://github.com/ai-blaise/dynamo-prod-k8s.git
+      targetRevision: main
+      path: deploy/helm/charts/snapshot
+      helm:
+        releaseName: dynamo-snapshot
+        valueFiles:
+          - $values/deploy/production/addons/dynamo-snapshot/values.yaml
+    - repoURL: https://github.com/ai-blaise/dynamo-prod-k8s.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dynamo-system
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

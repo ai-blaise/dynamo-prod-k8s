@@ -8,14 +8,24 @@
 image:
   controller:
     repository: ghcr.io/ai-blaise/criu-snapshots-controller
-    tag: "0.1.0"
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
   daemon:
     repository: ghcr.io/ai-blaise/criu-snapshots-daemon
-    tag: "0.1.0"
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
 
 installCRDs: true
+
+# v2 control plane: built-in SnapshotProfiles selected explicitly.
+# dynamo-sglang matches DGD worker pods by the operator's labels;
+# megatron-lm stays listed for the training clusters that layer this
+# same values file.
+profiles:
+  install: true
+  include:
+    - dynamo-sglang
+    - megatron-lm
 
 controller:
   replicas: 1

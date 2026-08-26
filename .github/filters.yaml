@@ -130,6 +130,7 @@ deploy:
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
+  - 'deploy/production/**'
   - 'tests/deploy/**'
   - 'tests/utils/managed_deployment.py'
   - '!**/*.md'

@@ -4,7 +4,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION = ROOT / "deploy" / "production"
 MODELEXPRESS_VALUES = PRODUCTION / "addons" / "modelexpress" / "values.yaml"
@@ -24,7 +23,10 @@ def test_modelexpress_is_a_baseline_gitops_addon():
     app = yaml.safe_load(MODELEXPRESS_APP.read_text())
 
     assert "apps/56-modelexpress.yaml" in kustomization["resources"]
-    assert "https://github.com/ai-dynamo/modelexpress.git" in project["spec"]["sourceRepos"]
+    assert (
+        "https://github.com/ai-dynamo/modelexpress.git"
+        in project["spec"]["sourceRepos"]
+    )
     assert app["metadata"]["name"] == "modelexpress"
     assert app["metadata"]["annotations"]["argocd.argoproj.io/sync-wave"] == "56"
     assert app["spec"]["destination"]["namespace"] == "modelexpress"
@@ -47,7 +49,9 @@ def test_modelexpress_is_a_baseline_gitops_addon():
 def test_modelexpress_values_use_kubernetes_backend_and_shared_models_cache():
     values = yaml.safe_load(MODELEXPRESS_VALUES.read_text())
 
-    assert values["image"]["repository"] == "nvcr.io/nvidia/ai-dynamo/modelexpress-server"
+    assert (
+        values["image"]["repository"] == "nvcr.io/nvidia/ai-dynamo/modelexpress-server"
+    )
     assert values["image"]["tag"] == "0.3.0"
     assert values["imagePullSecrets"] == [{"name": "nvcr-secret"}]
     assert values["service"]["port"] == 8001
@@ -79,5 +83,8 @@ def test_dynamo_platform_wires_native_model_express_url():
 def test_sglang_prefetches_speculative_draft_model_without_special_dgd_wiring():
     source = SGLANG_ARGS.read_text()
 
-    assert 'getattr(\n        parsed_args, "speculative_draft_model_path", None\n    )' in source
+    assert (
+        'getattr(\n        parsed_args, "speculative_draft_model_path", None\n    )'
+        in source
+    )
     assert "fetch_model(speculative_draft_model_path)" in source

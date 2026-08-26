@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Upstream NVIDIA Dynamo Snapshot agent + PVC for the prod a4-us-002-rl9 k3s
+# cluster (will generalise to the rest of the A4 fleet as it is built out).
+#
+# This is the upstream feature described in
+# https://developer.nvidia.com/blog/nvidia-dynamo-snapshot-fast-startup-for-inference-workloads-on-kubernetes/
+# and shipped by deploy/helm/charts/snapshot. It runs alongside the
+# operator-driven DGDS path from ai-blaise/criu-snapshots (sync wave 55);
+# the two are complementary:
+#
+#   - DGDS (criu-snapshots)  : operator + per-rank CRD + OCI artifacts in GHCR
+#                              + fingerprint guard. Used for live, in-place
+#                              snapshots of running DGD workers.
+#   - Dynamo Snapshot (this) : DaemonSet agent + Job-driven snapshotctl CLI +
+#                              cluster-local PVC. Used for build-time pre-warm
+#                              checkpoints and for the smoke + bench path the
+#                              NVIDIA blog post describes.
+#
+# See deploy/production/runbooks/dynamo-snapshot.md for install + checkpoint
+# + restore commands, and the helm chart's values.yaml for every knob.
+
+# k3s ships containerd at a non-default host path; the chart's daemonset
+# template re-bind-mounts the dir at the conventional in-container path so the
+# agent dials it correctly. storageDir likewise needs the k3s-flavoured path
+# for rootfs-diff capture.
+runtime:
+  type: containerd
+  socketPath: "/run/k3s/containerd/containerd.sock"
+  storageDir: "/var/lib/rancher/k3s/agent/containerd"
+
+openshift:
+  enabled: false
+
+storage:
+  type: pvc
+  # agentMount keeps things namespace-local; install the chart in each
+  # workload namespace that needs checkpoints. On the single-node a4 cluster
+  # the agent + workload pods share the same node, so ReadWriteOnce on the
+  # default local-path StorageClass is sufficient.
+  accessMode: agentMount
+  pvc:
+    create: true
+    name: snapshot-pvc
+    size: 200Gi
+    storageClass: "local-path"
+    accessMode: ReadWriteOnce
+    basePath: /checkpoints
+
+daemonset:
+  image:
+    repository: nvcr.io/nvidia/ai-dynamo/snapshot-agent
+    # Match the runtime ai-dynamo version baked into the REAP runtime image
+    # (ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4-dynamo-1.1.1).
+    tag: "1.1.1"
+    pullPolicy: IfNotPresent
+  snapshotLogLevel: info
+  # nvcr.io/nvidia/ai-dynamo/snapshot-agent is anonymously pullable.
+  imagePullSecrets: []
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+  tolerations:
+    - operator: Exists
+  resources:
+    limits:
+      cpu: 4
+      memory: 4Gi
+    requests:
+      cpu: 1
+      memory: 512Mi
+
+# CIQ kernel 5.14 on the a4 fleet already gates io_uring at the syscall layer,
+# but the agent installs a seccomp profile that explicitly blocks it (CRIU
+# cannot checkpoint io_uring). Keep deploy on; the init container is cheap.
+seccomp:
+  deploy: true
+
+serviceAccount:
+  create: true
+
+rbac:
+  create: true
+  # PVC-backed agentMount mode requires namespace-scoped RBAC.
+  namespaceRestricted: true

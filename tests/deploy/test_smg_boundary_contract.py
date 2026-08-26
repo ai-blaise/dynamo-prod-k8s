@@ -4,12 +4,9 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SMG_VALUES = ROOT / "deploy" / "production" / "addons" / "smg" / "values.yaml"
-GITOPS_KUSTOMIZATION = (
-    ROOT / "deploy" / "production" / "gitops" / "kustomization.yaml"
-)
+GITOPS_KUSTOMIZATION = ROOT / "deploy" / "production" / "gitops" / "kustomization.yaml"
 
 
 def test_smg_values_only_configure_http_gateway_features():

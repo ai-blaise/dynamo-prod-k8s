@@ -21,8 +21,8 @@ from collections.abc import AsyncGenerator, Callable
 from dataclasses import asdict
 from typing import Any, Optional
 
-from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.disaggregated_params import DisaggScheduleStyle
+from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi import KvCacheConfig, SchedulerConfig
 from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
@@ -531,8 +531,8 @@ class TrtllmLLMEngine(LLMEngine):
                 disaggregated_params = request_params
                 disaggregated_params.request_type = "context_only"
                 if disaggregated_params.disagg_request_id is None:
-                    disaggregated_params.disagg_request_id = get_global_disagg_request_id(
-                        self._disagg_machine_id
+                    disaggregated_params.disagg_request_id = (
+                        get_global_disagg_request_id(self._disagg_machine_id)
                     )
             else:
                 disaggregated_params = LlmDisaggregatedParams(
